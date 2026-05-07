@@ -268,7 +268,7 @@ func pathSubsNotice(subs [][2]string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("[felix] adjusted paths in command (Unicode-whitespace recovery):\n")
+	b.WriteString("[harness] adjusted paths in command (Unicode-whitespace recovery):\n")
 	for _, s := range subs {
 		fmt.Fprintf(&b, "  %q -> %q\n", s[0], s[1])
 	}

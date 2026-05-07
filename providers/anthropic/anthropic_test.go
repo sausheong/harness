@@ -382,7 +382,7 @@ func TestBuildMessageParamsIsPure(t *testing.T) {
 		MaxTokens:   4096,
 		Temperature: 0.7,
 		SystemPromptParts: []llm.SystemPromptPart{
-			{Text: "you are felix", Cache: true},
+			{Text: "you are an assistant", Cache: true},
 			{Text: "today is 2026-05-01"},
 		},
 		Messages: []llm.Message{

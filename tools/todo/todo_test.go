@@ -30,7 +30,7 @@ func TestTodoWriteAddReturnsItemAndPersists(t *testing.T) {
 	assert.Contains(t, res.Output, "[ ] t1 — first task")
 
 	// Persisted to disk so a fresh tool instance picks it up.
-	path := filepath.Join(dir, ".felix", "todos.json")
+	path := filepath.Join(dir, ".harness", "todos.json")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "first task")
@@ -145,8 +145,8 @@ func TestFormatTodosSortsByStatusThenID(t *testing.T) {
 
 func TestTodoWriteCorruptStoreSurfacesError(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".felix"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".felix", "todos.json"), []byte("{not valid json"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".harness"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".harness", "todos.json"), []byte("{not valid json"), 0o644))
 
 	tool := &TodoWriteTool{WorkDir: dir}
 	res, _ := tool.Execute(context.Background(), json.RawMessage(`{"op":"list"}`))

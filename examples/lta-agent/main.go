@@ -1,5 +1,5 @@
-// LTA Datamall agent — a non-Felix consumer of the harness framework
-// that proves the API isn't accidentally Felix-shaped.
+// LTA Datamall agent — example of building a domain-specific agent on
+// the harness framework with custom tools (no harness/tools/* deps).
 //
 // Composition surface used:
 //   - tool.Registry (BYO concrete tools — none from harness/tools/*)
@@ -9,9 +9,8 @@
 //   - runtime.Run streaming loop
 //
 // Deliberately NOT used:
-//   - Skills, Memory, KnowledgeGraph (consumer doesn't need them)
+//   - Skills, Memory, KnowledgeGraph (this agent doesn't need them)
 //   - Subagents, compaction, calibrator persistence
-//   - Any Felix-specific config or path conventions
 //
 // Run:
 //

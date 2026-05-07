@@ -86,12 +86,14 @@ func buildDefaultIdentity(toolNames []string) string {
 // per-turn. Suitable to call once at Runtime construction.
 //
 // configSummary is the consumer's place to advertise things like the
-// configured agents, channel bindings, configuration paths, or any other
-// hot-reload-bound context. Felix uses it to inject a list of configured
-// agents and the path to felix.json5; other consumers can leave it empty.
+// configured agents, channel bindings, configuration paths, or any
+// other hot-reload-bound context. Leave empty if you have nothing to
+// surface.
 //
 // memoryFiles is the consumer's place to inject project / user memory
-// files (e.g., Felix walks FELIX.md and AGENTS.md from workspace + $HOME).
+// files. A common pattern is to concatenate AGENTS.md from the
+// workspace and the user's $HOME, but the harness only treats this as
+// opaque text to append.
 func BuildStaticSystemPrompt(
 	workspace, systemPrompt, agentID, agentName string,
 	toolNames []string,
@@ -404,7 +406,7 @@ const (
 // without a workspace working unchanged.
 //
 // When Workspace is set, oversized tool results are written to
-// <Workspace>/.felix/spill/<SessionKey>/<ToolCallID>.txt and the message
+// <Workspace>/.harness/spill/<SessionKey>/<ToolCallID>.txt and the message
 // is rewritten as: head preview (first maxLen chars cut at newline) +
 // spillMarker pointing the model at the absolute path so it can recover
 // the full output via read_file (which gates on Workspace).
@@ -421,7 +423,7 @@ func spillToolResult(cfg spillConfig, toolCallID, content string) (string, error
 	if cfg.Workspace == "" || cfg.SessionKey == "" || toolCallID == "" {
 		return "", fmt.Errorf("spillToolResult: workspace, session key, and tool call id are required")
 	}
-	dir := filepath.Join(cfg.Workspace, ".felix", "spill", cfg.SessionKey)
+	dir := filepath.Join(cfg.Workspace, ".harness", "spill", cfg.SessionKey)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("spill mkdir: %w", err)
 	}
@@ -440,7 +442,7 @@ func spillToolResult(cfg spillConfig, toolCallID, content string) (string, error
 //
 // Two modes:
 //   - With cfg.Workspace + cfg.SessionKey set: the FULL original content
-//     is written to <Workspace>/.felix/spill/<SessionKey>/<ToolCallID>.txt
+//     is written to <Workspace>/.harness/spill/<SessionKey>/<ToolCallID>.txt
 //     and the message becomes "<head>\n\n[spilled — N of M chars saved
 //     to <abs path>; use read_file to access the full output]". The
 //     model can recover the entire output via read_file, eliminating the

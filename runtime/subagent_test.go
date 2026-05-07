@@ -229,9 +229,9 @@ loop:
 }
 
 // TestRun_SubagentDepthCapEnforced verifies the cap stops construction past
-// the configured limit. With FELIX_MAX_AGENT_DEPTH=2, a parent at depth 0
-// can call a subagent (depth 1), and that subagent can call another (depth 2),
-// but a third-level attempt (depth 3) must fail with the cap error and the
+// the configured limit. With MaxAgentDepth=2, a parent at depth 0 can call
+// a subagent (depth 1), and that subagent can call another (depth 2), but
+// a third-level attempt (depth 3) must fail with the cap error and the
 // would-be subagent's RuntimeInputs builder must NOT be invoked.
 //
 // Note: this test reimplements the factory wiring rather than calling

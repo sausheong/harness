@@ -13,9 +13,10 @@ import "github.com/sausheong/harness/session"
 // that preserves K turns. Caller should refuse to compact rather than over-
 // compacting.
 //
-// A user message is always a clean boundary by construction in Felix's
-// runtime (user msg → assistant text → tool_call → tool_result → next user
-// msg). Splitting before a user message therefore never orphans a tool pair.
+// A user message is always a clean boundary by construction in the
+// harness runtime (user msg → assistant text → tool_call → tool_result
+// → next user msg). Splitting before a user message therefore never
+// orphans a tool pair.
 func Split(history []session.SessionEntry, K int) (toCompact, toPreserve []session.SessionEntry, ok bool) {
 	if K <= 0 || len(history) == 0 {
 		return nil, nil, false

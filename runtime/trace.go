@@ -96,7 +96,7 @@ func NewTrace(agentID, model string) *Trace {
 	if otelTracer != nil {
 		_, t.span = otelTracer.Start(context.Background(), "agent.run",
 			trace.WithAttributes(
-				attribute.String("felix.trace_id", id),
+				attribute.String("harness.trace_id", id),
 				attribute.String("agent.id", agentID),
 				attribute.String("llm.model", model),
 			),
@@ -219,8 +219,8 @@ func (t *Trace) Summary() {
 
 	if t.span != nil {
 		t.span.SetAttributes(
-			attribute.Int64("felix.total_ms", total),
-			attribute.Int("felix.phase_count", len(t.phases)),
+			attribute.Int64("harness.total_ms", total),
+			attribute.Int("harness.phase_count", len(t.phases)),
 		)
 		t.span.End()
 	}

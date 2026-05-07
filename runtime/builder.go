@@ -25,8 +25,9 @@ type RuntimeDeps struct {
 	// KGFn returns the per-agent KnowledgeGraph for the given model
 	// string. Nil at the call site means KG is disabled for this Runtime.
 	// The function shape (rather than a single KG) lets consumers route
-	// the chatting agent's own model to the KG's underlying LLM (Felix
-	// uses this to mirror the chat model into Cortex's extractor).
+	// the chatting agent's own model to the KG's underlying LLM — useful
+	// when the KG runs an extractor on the same provider/model as the
+	// agent itself.
 	KGFn func(model string) KnowledgeGraph
 	// AgentLoop carries the loop tunables (concurrency cap, depth cap,
 	// streaming-tools toggle). Copied verbatim into every Runtime built
@@ -42,8 +43,9 @@ type RuntimeDeps struct {
 	// changes only on hot-reload.
 	ConfigSummary string
 	// MemoryFiles, when non-empty, is appended to the static system
-	// prompt. Consumers compose this themselves (Felix walks
-	// FELIX.md / AGENTS.md from workspace + $HOME).
+	// prompt. Consumers compose this themselves — typical pattern is to
+	// concatenate AGENTS.md (and any project-specific identity files)
+	// from the workspace and the user's $HOME.
 	MemoryFiles string
 }
 

@@ -15,8 +15,9 @@ import (
 )
 
 // ExpandHome rewrites a leading "~" or "~/" in p to the user's home directory.
-// Other tildes (mid-path, "~user/...") are left alone — Felix never escalates
-// privileges, so cross-user tilde expansion would silently fail anyway.
+// Other tildes (mid-path, "~user/...") are left alone — the harness never
+// escalates privileges, so cross-user tilde expansion would silently fail
+// anyway.
 //
 // The shell ($BASH/zsh) does this expansion before exec, which is why the
 // bash tool works without it. read/write/edit_file call os.Open directly so
@@ -156,7 +157,7 @@ func SanitizeLLMText(s string) string {
 	return b.String()
 }
 
-// Tool is the interface that all Felix tools must implement.
+// Tool is the interface every harness tool must implement.
 type Tool interface {
 	Name() string
 	Description() string

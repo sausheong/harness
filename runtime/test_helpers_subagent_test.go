@@ -6,11 +6,11 @@ import (
 	"github.com/sausheong/harness/llm"
 )
 
-// testCfg is the harness test analogue of Felix's *config.Config — bundles
-// a SubagentResolver with the small accessor helpers (EligibleSubagents,
-// GetAgent) that subagent tests reach for. Lets the subagent_test.go and
-// inheritance_test.go call sites keep their `cfg.X()` shape after the
-// extraction without rewriting every test.
+// testCfg is a tiny stand-in for whatever live-config object a real
+// consumer would hold. It bundles a SubagentResolver with the small
+// accessor helpers (EligibleSubagents, GetAgent) that subagent tests
+// reach for, so subagent_test.go and inheritance_test.go can keep
+// their `cfg.X()` call shape.
 type testCfg struct {
 	specs    map[string]AgentSpec
 	subagent map[string]bool   // id → registered as subagent
@@ -41,7 +41,8 @@ func (c *testCfg) GetAgent(id string) (AgentSpec, bool) {
 }
 
 // newTwoAgentCfg builds a fixture with a parent ("default") and one
-// subagent ("researcher"). Direct port of Felix's twoAgentConfig fixture.
+// subagent ("researcher") — the minimal shape needed to exercise the
+// task-tool dispatch path.
 func newTwoAgentCfg(t *testing.T) *testCfg {
 	t.Helper()
 	parent := AgentSpec{

@@ -5,10 +5,11 @@ import "context"
 // AgentSpec is the framework's view of an agent. Consumers convert their
 // own agent-config types into this struct before invoking BuildRuntime.
 //
-// Mirrors the fields Runtime actually consumes; Felix-specific options
-// (per-agent tool policies, MCP server bindings, channel routing,
-// inheritContext flag, subagent registration, identity files) live in the
-// consumer's config and are resolved before this struct is filled in.
+// Holds only the fields Runtime actually consumes. Anything richer that
+// a consumer's config carries (per-agent tool policies, MCP server
+// bindings, channel routing, inheritContext flags, subagent
+// registration, identity files) is resolved by the consumer before this
+// struct is filled in.
 type AgentSpec struct {
 	// ID identifies the agent for logging, session paths, and subagent
 	// resolution. Used as session.Session.AgentID.
@@ -43,11 +44,10 @@ type AgentSpec struct {
 	Loop LoopConfig
 }
 
-// LoopConfig tunes the agent runtime's tool-execution behavior. Mirrors
-// Felix's AgentLoopConfig with framework-side env-var fallbacks
-// (HARNESS_MAX_TOOL_CONCURRENCY, HARNESS_MAX_AGENT_DEPTH,
-// HARNESS_STREAMING_TOOLS) — Felix consumers may set the FELIX_* env vars
-// instead by setting these fields explicitly from their own config block.
+// LoopConfig tunes the agent runtime's tool-execution behavior. Each
+// field has a built-in env-var fallback (HARNESS_MAX_TOOL_CONCURRENCY,
+// HARNESS_MAX_AGENT_DEPTH, HARNESS_STREAMING_TOOLS); set the field
+// explicitly from your own config to bypass the env vars.
 type LoopConfig struct {
 	// MaxToolConcurrency caps parallel tool dispatch within a safe batch.
 	// 0 ⇒ env fallback then default 10.
@@ -91,7 +91,9 @@ type Message struct {
 }
 
 // KnowledgeGraph is the optional plug point for a long-term memory /
-// knowledge-graph backend. Felix wires this to its cortex adapter.
+// knowledge-graph backend. Wire your own implementation if you need
+// recall + ingest hooks; leave deps.KGFn nil to disable the entire
+// pathway.
 //
 //   - ShouldRecall is called synchronously at the start of every Run
 //     before scheduling the recall goroutine. Cheap; should return
@@ -121,6 +123,7 @@ type KnowledgeGraph interface {
 // child Runtime. Returning ok=false makes TaskTool surface a "subagent
 // %q not found" error to the parent LLM.
 //
-// Implementations typically read from a live config so subagent
-// definitions hot-reload (Felix reads through *config.Config).
+// Implementations typically read from a live config object (often via
+// an atomic.Value) so subagent definitions hot-reload without
+// restarting the runtime.
 type SubagentResolver func(agentID string) (spec AgentSpec, registered bool, ok bool)

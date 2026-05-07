@@ -36,8 +36,8 @@ type SubagentBuildFn func(spec AgentSpec) (RuntimeInputs, error)
 type SubagentSpec struct {
 	Spec AgentSpec
 	// Registered reports whether the consumer considers this subagent ID
-	// valid for parent-driven invocation. Mirrors Felix's
-	// AgentConfig.Subagent flag.
+	// valid for parent-driven invocation. False prevents a parent agent
+	// from spawning this child via the task tool.
 	Registered bool
 	// InheritContext, when true, copies the parent session's view into
 	// the child session before BuildRuntime fires.

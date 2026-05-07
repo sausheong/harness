@@ -48,9 +48,9 @@ func transcriptDelimiterSuffix() string {
 //   - Section 6 ("All user messages") is the load-bearing anti-drift
 //     mechanism. Without it, summarizers collapse multiple distinct user
 //     asks into a single sentence keyed off whichever topic came first,
-//     which causes the next turn to misframe the conversation (Felix bug
-//     post-mortem: model said "previous conversation covered Colima" when
-//     the most recent topic was Wasm/Extism).
+//     which causes the next turn to misframe the conversation — the
+//     resumed model says "previous conversation covered X" when the
+//     most recent topic was actually Y.
 //   - Section 9 ("Optional Next Step") demands verbatim quotes from the
 //     most recent messages so the resumed turn doesn't drift on task
 //     interpretation.

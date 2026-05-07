@@ -1,9 +1,9 @@
 # harness
 
-A reusable Go agentic harness extracted from [Felix](https://github.com/sausheong/felix).
-Implements the streaming agent loop, tool registry, session storage, compaction, and
-token budgeting that drive a multi-provider LLM agent. BYO concrete tools, BYO
-provider clients, BYO memory/knowledge-graph plugins.
+A reusable Go agentic platform for building LLM agents. Implements the
+streaming agent loop, tool registry, session storage, compaction, and
+token budgeting needed to run a multi-provider agent in production. BYO
+concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
 ## Packages
 
@@ -74,13 +74,25 @@ func main() {
 }
 ```
 
-## What was lifted from Felix
+## Design
 
-This module is a structural extraction of `internal/{agent,llm,tools,session,compaction,tokens}`.
-Behavior is preserved verbatim — same partition algorithm, same compaction triggers,
-same prompt cache stability rules, same token calibrator. Felix-specific pieces
-(HTTP gateway, JSON5 config, MCP client, bundled Ollama, knowledge-graph adapter,
-markdown skill loader, Telegram outbound, file-backed memory) stay in Felix.
+The harness is intentionally minimal. Every agent gets:
+
+- A streaming think-act loop with parallel tool dispatch
+- A pluggable LLM provider interface (Anthropic, OpenAI, Gemini, Qwen
+  built in; bring your own to add more)
+- Append-only session storage with optional JSONL persistence
+- Three-stage summarize-and-splice compaction with prompt-cache-stable
+  prefixes
+- A token budget calibrator that learns the chars→tokens ratio per
+  session
+
+Everything else — skills, long-term memory, knowledge graphs,
+permission policies, subagent dispatch, on-disk session stores — is an
+optional plug-point. Pass `nil` and it disappears.
+
+See [`developer.md`](./developer.md) for a step-by-step guide to
+building agents on top of harness.
 
 ## Status
 

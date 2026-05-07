@@ -1,6 +1,6 @@
-// data.gov.sg agent — a second non-Felix consumer of the harness framework
-// that talks to Singapore's open-data APIs (real-time environment + CKAN
-// dataset catalog).
+// data.gov.sg agent — example agent built on harness that talks to
+// Singapore's open-data APIs (real-time environment + CKAN dataset
+// catalog).
 //
 // Composition surface used (identical to lta-agent):
 //   - tool.Registry (BYO concrete tools — none from harness/tools/*)

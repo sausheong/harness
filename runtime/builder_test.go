@@ -36,10 +36,10 @@ func TestBuildRuntimeMinimalSpecSafe(t *testing.T) {
 }
 
 func TestBuildRuntimeUsesCallerProvidedMemoryFiles(t *testing.T) {
-	// Caller composes memoryFiles however they want (Felix walks
-	// FELIX.md/AGENTS.md from workspace + $HOME; other consumers may
-	// build it from a wiki dump, a doc index, etc.). Harness only
-	// concatenates it into the static prompt.
+	// Caller composes memoryFiles however they want — typical patterns
+	// include walking AGENTS.md from workspace + $HOME, building from a
+	// wiki dump, or pulling from a doc index. Harness only concatenates
+	// it into the static prompt.
 	const sentinel = "MEMFILE_END_TO_END_SENTINEL"
 	deps := RuntimeDeps{
 		MemoryFiles: "\n\n## Project memory: AGENTS.md\n\n" + sentinel,

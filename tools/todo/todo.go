@@ -32,7 +32,7 @@ type TodoItem struct {
 }
 
 // TodoWriteTool maintains a per-workspace todo list the agent uses to
-// track multi-step work. Persisted to <Workspace>/.felix/todos.json so
+// track multi-step work. Persisted to <Workspace>/.harness/todos.json so
 // it survives across turns within a session and across sessions for
 // the same workspace.
 //
@@ -175,7 +175,7 @@ func (t *TodoWriteTool) Execute(_ context.Context, input json.RawMessage) (tool.
 	return tool.ToolResult{Output: formatTodos(items)}, nil
 }
 
-// load reads the persisted todos from <WorkDir>/.felix/todos.json.
+// load reads the persisted todos from <WorkDir>/.harness/todos.json.
 // Missing file → empty list (not an error). Corrupt JSON → error so
 // the agent knows the file needs manual repair rather than silently
 // dropping work.
@@ -217,7 +217,7 @@ func (t *TodoWriteTool) save(items []TodoItem) error {
 }
 
 func (t *TodoWriteTool) todosPath() string {
-	return filepath.Join(t.WorkDir, ".felix", "todos.json")
+	return filepath.Join(t.WorkDir, ".harness", "todos.json")
 }
 
 // nextTodoID returns the next sequential id (t1, t2, …) — short and

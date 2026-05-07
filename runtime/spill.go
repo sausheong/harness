@@ -14,12 +14,12 @@ import (
 //
 // Mirrors the path layout used by spillToolResult in context.go:
 //
-//	<workspace>/.felix/spill/<sessionKey>/
+//	<workspace>/.harness/spill/<sessionKey>/
 func SpillDirForSession(workspace, sessionKey string) string {
 	if workspace == "" || sessionKey == "" {
 		return ""
 	}
-	return filepath.Join(workspace, ".felix", "spill", sessionKey)
+	return filepath.Join(workspace, ".harness", "spill", sessionKey)
 }
 
 // RemoveSessionSpill removes the per-session spill directory if it exists.
@@ -42,7 +42,7 @@ func SpillRoot(workspace string) string {
 	if workspace == "" {
 		return ""
 	}
-	return filepath.Join(workspace, ".felix", "spill")
+	return filepath.Join(workspace, ".harness", "spill")
 }
 
 // LiveSessionKeysFn returns the set of currently-existing session keys for
@@ -51,7 +51,7 @@ func SpillRoot(workspace string) string {
 // session JSONL on disk).
 type LiveSessionKeysFn func() (map[string]bool, error)
 
-// CleanupOrphanedSpills walks <workspace>/.felix/spill/ and removes any
+// CleanupOrphanedSpills walks <workspace>/.harness/spill/ and removes any
 // per-session subdirectory whose key is not in the set returned by liveKeys.
 // Returns the number of directories removed and the first error encountered
 // (if any). Missing root is not an error — it just means nothing to clean.

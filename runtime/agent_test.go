@@ -44,9 +44,10 @@ func TestBuildStaticSystemPromptIdentity(t *testing.T) {
 	require.NoError(t, err)
 
 	// Consumers wanting "configuration file is at ..." in the static prompt
-	// pass it through deps.ConfigSummary; the harness no longer hard-codes
-	// Felix's config path. Verify the agent identity + IDENTITY.md content
-	// land verbatim, plus that a caller-supplied config summary is honoured.
+	// pass it through deps.ConfigSummary; the harness does not hard-code
+	// any config path of its own. Verify the agent identity + IDENTITY.md
+	// content land verbatim, plus that a caller-supplied config summary
+	// is honoured.
 	result := BuildStaticSystemPrompt(dir, "", "test", "Test Agent",
 		[]string{"read_file", "bash"}, "configuration file is at /tmp/x.json", "", "", "")
 	assert.Contains(t, result, identityContent)
@@ -308,7 +309,7 @@ func TestPruneToolResultsSpillsToDisk(t *testing.T) {
 	// Spill file lives where the marker text says it does, holds the
 	// full original content, and the path embedded in the message is
 	// absolute (so read_file's path handling works regardless of CWD).
-	wantPath := filepath.Join(workspace, ".felix", "spill", "sess_abc", "tc_42.txt")
+	wantPath := filepath.Join(workspace, ".harness", "spill", "sess_abc", "tc_42.txt")
 	assert.Contains(t, got, wantPath)
 	assert.True(t, filepath.IsAbs(wantPath))
 	data, err := os.ReadFile(wantPath)
