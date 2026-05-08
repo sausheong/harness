@@ -15,6 +15,7 @@ import (
 	"github.com/sausheong/harness/session"
 	"github.com/sausheong/harness/tokens"
 	"github.com/sausheong/harness/tool"
+	"github.com/sausheong/harness/tools/mcp"
 )
 
 // EventType identifies the kind of agent event.
@@ -112,6 +113,28 @@ type Runtime struct {
 	CalibratorStore *tokens.CalibratorStore
 
 	calibrator *tokens.Calibrator
+
+	// mcpClients holds the MCP client sessions resolved from
+	// AgentSpec.MCPServers. Released by Close. Untouched when MCP is
+	// not used.
+	mcpClients []*mcp.Client
+}
+
+// Close releases external resources owned by the Runtime — currently
+// just the MCP client sessions resolved from AgentSpec.MCPServers.
+// Optional: callers who never use MCP can skip it. Safe to call
+// multiple times; safe to call before or after Run completes.
+// Returns the first Close error encountered, if any; remaining
+// clients are still closed.
+func (r *Runtime) Close() error {
+	var firstErr error
+	for _, c := range r.mcpClients {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	r.mcpClients = nil
+	return firstErr
 }
 
 // emit sends ev to this runtime's events channel and forwards a copy to
@@ -219,6 +242,28 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		defer close(r.events)
 		defer tr.Summary()
 
+		// stopReason is read by the OnStop deferred hook below. Each early
+		// return path reassigns it before returning. Default is "max_turns"
+		// so the natural fall-through (loop exhausted MaxTurns) records the
+		// right reason without an explicit assignment at that exit.
+		stopReason := "max_turns"
+		if hook := r.AgentLoop.Hooks.OnStop; hook != nil {
+			defer func() { hook(ctx, stopReason) }()
+		}
+
+		// OnUserPromptSubmit may rewrite prompt and/or images BEFORE the
+		// session sees them. Returning err aborts Run with EventError.
+		if hook := r.AgentLoop.Hooks.OnUserPromptSubmit; hook != nil {
+			newMsg, newImgs, err := hook(ctx, userMsg, images)
+			if err != nil {
+				stopReason = "error"
+				r.emit(AgentEvent{Type: EventError, Error: err})
+				return
+			}
+			userMsg = newMsg
+			images = newImgs
+		}
+
 		if len(images) > 0 {
 			var imgData []session.ImageData
 			for _, img := range images {
@@ -230,6 +275,10 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			r.Session.Append(session.UserMessageWithImagesEntry(userMsg, imgData))
 		} else {
 			r.Session.Append(session.UserMessageEntry(userMsg))
+		}
+
+		if hook := r.AgentLoop.Hooks.OnSessionStart; hook != nil {
+			hook(ctx, r.Session)
 		}
 
 		// Initialise KG thread and recall (once, before the loop). Recall
@@ -279,6 +328,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 
 		for turn := 0; turn < maxTurns; turn++ {
 			if ctx.Err() != nil {
+				stopReason = "aborted"
 				r.emit(AgentEvent{Type: EventAborted})
 				return
 			}
@@ -418,6 +468,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					stream, err = r.LLM.ChatStream(ctx, req)
 				}
 				if err != nil {
+					stopReason = "error"
 					r.emit(AgentEvent{Type: EventError, Error: fmt.Errorf("llm error: %w", err)})
 					return
 				}
@@ -501,6 +552,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 								kickoffStopped = false
 								nsStream, retryErr := ns.ChatNonStreaming(ctx, req)
 								if retryErr != nil {
+									stopReason = "error"
 									r.emit(AgentEvent{Type: EventError, Error: retryErr})
 									return
 								}
@@ -510,6 +562,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							}
 						}
 						drainKickoffs(kickoffs)
+						stopReason = "error"
 						r.emit(AgentEvent{Type: EventError, Error: event.Error})
 						return
 					}
@@ -538,6 +591,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					drainKickoffs(kickoffs)
 				}
 				tr.Mark("agent.done", "turn", turn, "reason", "no_tool_calls")
+				stopReason = "completed"
 				r.emit(AgentEvent{Type: EventDone, Usage: lastUsage})
 				r.maybeKickoffAsyncCompaction(msgs, parts, toolDefs)
 				return
@@ -584,6 +638,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 								r.kgMu.Unlock()
 							}
 						}
+						stopReason = "aborted"
 						r.emit(AgentEvent{Type: EventAborted})
 						return
 					}
@@ -606,12 +661,15 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			batches := partitionToolCalls(pending, r.Tools)
 			for _, b := range batches {
 				if r.runBatch(ctx, b, kgThreadOrNil(r.KG, &thread), turn, tr) {
+					stopReason = "aborted"
 					r.emit(AgentEvent{Type: EventAborted})
 					return
 				}
 			}
 		}
 
+		// stopReason already "max_turns" by default — fall through to
+		// the EventError below records "agent exceeded maximum turns".
 		r.emit(AgentEvent{
 			Type:  EventError,
 			Error: fmt.Errorf("agent exceeded maximum turns (%d)", maxTurns),
@@ -660,9 +718,33 @@ func (r *Runtime) dispatchTool(
 		r.kgMu.Unlock()
 	}
 
+	// BeforeToolUse fires before the PermissionChecker. A hook denial
+	// has the same observable shape as a Permission.Check denial.
+	if hook := r.AgentLoop.Hooks.BeforeToolUse; hook != nil {
+		d, err := hook(ctx, tc.Name, tc.Input)
+		if err != nil {
+			res := r.appendDenialResult(tc.ID, err.Error(), kgThread)
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
+		}
+		if !d.Allow {
+			res := r.appendDenialResult(tc.ID, d.Reason, kgThread)
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
+		}
+	}
+
 	if r.Permission != nil {
 		if d := r.Permission.Check(ctx, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
-			return r.appendDenialResult(tc.ID, d.Reason, kgThread), false
+			res := r.appendDenialResult(tc.ID, d.Reason, kgThread)
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
 		}
 	}
 
@@ -695,6 +777,10 @@ func (r *Runtime) dispatchTool(
 		r.recordFileTouch(extractPathFromInput(tc.Input))
 	}
 
+	if hook := r.AgentLoop.Hooks.AfterToolUse; hook != nil {
+		hook(ctx, tc.Name, tc.Input, result)
+	}
+
 	return result, false
 }
 
@@ -702,9 +788,30 @@ func (r *Runtime) dispatchTool(
 // Execute call WITHOUT touching session or KG thread. Used by the
 // streaming kickoff goroutines.
 func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (result tool.ToolResult, aborted bool) {
+	if hook := r.AgentLoop.Hooks.BeforeToolUse; hook != nil {
+		d, err := hook(ctx, tc.Name, tc.Input)
+		if err != nil {
+			res := tool.ToolResult{Error: err.Error()}
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
+		}
+		if !d.Allow {
+			res := tool.ToolResult{Error: d.Reason}
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
+		}
+	}
 	if r.Permission != nil {
 		if d := r.Permission.Check(ctx, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
-			return tool.ToolResult{Error: d.Reason}, false
+			res := tool.ToolResult{Error: d.Reason}
+			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
+				after(ctx, tc.Name, tc.Input, res)
+			}
+			return res, false
 		}
 	}
 	if ctx.Err() != nil {
@@ -719,6 +826,9 @@ func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (resu
 	}
 	if result.Error == "" && isFileTool(tc.Name) {
 		r.recordFileTouch(extractPathFromInput(tc.Input))
+	}
+	if hook := r.AgentLoop.Hooks.AfterToolUse; hook != nil {
+		hook(ctx, tc.Name, tc.Input, result)
 	}
 	return result, false
 }

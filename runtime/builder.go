@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/sausheong/harness/compaction"
@@ -8,6 +10,7 @@ import (
 	"github.com/sausheong/harness/session"
 	"github.com/sausheong/harness/tokens"
 	"github.com/sausheong/harness/tool"
+	"github.com/sausheong/harness/tools/mcp"
 )
 
 // RuntimeDeps holds the long-lived dependencies that every Runtime in this
@@ -87,6 +90,7 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 	// *tool.Registry rather than widening tool.Executor — production
 	// callers always pass *tool.Registry; test paths that don't won't
 	// get load tools registered (which is fine for them).
+	var mcpClients []*mcp.Client
 	if reg, ok := inputs.Tools.(*tool.Registry); ok {
 		if deps.Skills != nil {
 			skills := deps.Skills
@@ -104,6 +108,24 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 				},
 			})
 		}
+		// Connect declared MCP servers and register their adapter tools.
+		// On any failure, close everything connected so far before
+		// returning — a partially-built Runtime would leak processes.
+		for _, srv := range spec.MCPServers {
+			cli, err := mcp.Connect(context.Background(), srv)
+			if err != nil {
+				for _, c := range mcpClients {
+					_ = c.Close()
+				}
+				return nil, fmt.Errorf("mcp server %q: %w", srv.Name, err)
+			}
+			for _, t := range cli.Tools() {
+				reg.Register(t)
+			}
+			mcpClients = append(mcpClients, cli)
+		}
+	} else if len(spec.MCPServers) > 0 {
+		return nil, fmt.Errorf("AgentSpec.MCPServers requires inputs.Tools to be *tool.Registry")
 	}
 
 	// Pre-compute the static portion of the system prompt so the per-turn
@@ -167,6 +189,7 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 		AgentLoop:          deps.AgentLoop,
 		StaticSystemPrompt: staticPrompt,
 		CalibratorStore:    deps.CalibratorStore,
+		mcpClients:         mcpClients,
 	}
 
 	// Seed the calibrator from prior (ratio, count) for this session so a

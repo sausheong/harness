@@ -101,6 +101,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "build runtime:", err)
 		os.Exit(1)
 	}
+	defer rt.Close() // no-op here (no MCP), but idiomatic
 
 	fmt.Println("LTA Singapore Transit Assistant — type a question, blank line to exit")
 	fmt.Println("Examples:")

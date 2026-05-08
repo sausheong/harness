@@ -1,4 +1,4 @@
-// Mock customer-support agent — third example demonstrating two harness
+// Mock customer-support agent — third example demonstrating three harness
 // surfaces the previous agents skip:
 //
 //   - SkillProvider: the knowledge base is exposed as harness "skills".
@@ -10,6 +10,11 @@
 //     are gated on a "supervisor mode" flag. By default the agent can
 //     read tickets and the KB but cannot mutate state — flip
 //     SUPPORT_AGENT_SUPERVISOR=1 (or pass --supervisor) to unlock.
+//
+//   - LifecycleHooks: every tool call (including denials and errors) is
+//     written to an audit log via AfterToolUse. The OnStop hook records
+//     the run outcome. This is the pattern any compliance-sensitive
+//     support deployment will want.
 //
 // Backend is fully in-memory: a few seed tickets are pre-populated. Run:
 //
@@ -28,6 +33,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -72,11 +78,44 @@ func main() {
 	sess := session.NewSession("support-agent", "main")
 	prov := anthropic.NewAnthropicProvider(apiKey, "")
 
+	// LifecycleHooks: write a JSONL audit log of every tool call (with
+	// outcome) and a record of every Run's stop reason. Compliance-
+	// sensitive support deployments will want this kind of trail.
+	auditPath := "support-agent-audit.jsonl"
+	if v := os.Getenv("SUPPORT_AGENT_AUDIT_LOG"); v != "" {
+		auditPath = v
+	}
+	audit, err := newAuditLog(auditPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "open audit log:", err)
+		os.Exit(1)
+	}
+	defer audit.Close()
+	fmt.Fprintf(os.Stderr, "Auditing tool calls to %s\n", auditPath)
+
 	rt, err := runtime.BuildRuntime(
 		runtime.RuntimeDeps{
 			AgentLoop: runtime.LoopConfig{
 				MaxToolConcurrency: 3,
 				MaxAgentDepth:      1,
+				Hooks: runtime.LifecycleHooks{
+					AfterToolUse: func(_ context.Context, name string, input json.RawMessage, res tool.ToolResult) {
+						audit.Log(map[string]any{
+							"kind":    "tool",
+							"name":    name,
+							"input":   json.RawMessage(input),
+							"ok":      res.Error == "",
+							"error":   res.Error,
+							"outchars": len(res.Output),
+						})
+					},
+					OnStop: func(_ context.Context, reason string) {
+						audit.Log(map[string]any{
+							"kind":   "run_end",
+							"reason": reason,
+						})
+					},
+				},
 			},
 			// SkillProvider: contributes a KB index to the static system
 			// prompt and backs the auto-registered load_skill tool.
@@ -124,6 +163,7 @@ Tone:
 		fmt.Fprintln(os.Stderr, "build runtime:", err)
 		os.Exit(1)
 	}
+	defer rt.Close() // no-op here (no MCP), but idiomatic
 
 	mode := "agent mode"
 	if supervisor {

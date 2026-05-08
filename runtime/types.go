@@ -1,6 +1,14 @@
 package runtime
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/sausheong/harness/llm"
+	"github.com/sausheong/harness/session"
+	"github.com/sausheong/harness/tool"
+	"github.com/sausheong/harness/tools/mcp"
+)
 
 // AgentSpec is the framework's view of an agent. Consumers convert their
 // own agent-config types into this struct before invoking BuildRuntime.
@@ -42,6 +50,11 @@ type AgentSpec struct {
 	// cap, depth cap, streaming-tools toggle). Zero value ⇒ env-var
 	// fallback then compiled-in defaults.
 	Loop LoopConfig
+	// MCPServers, when non-empty, are connected by BuildRuntime: each
+	// server's tools are namespaced ("mcp__<Name>__<tool>") and added
+	// to the agent's tool registry. Runtime.Close releases the
+	// underlying sessions. Connection failures abort BuildRuntime.
+	MCPServers []mcp.ServerConfig
 }
 
 // LoopConfig tunes the agent runtime's tool-execution behavior. Each
@@ -58,6 +71,53 @@ type LoopConfig struct {
 	// StreamingTools enables mid-stream concurrency-safe tool kickoff.
 	// false ⇒ env fallback (HARNESS_STREAMING_TOOLS=1) then off.
 	StreamingTools bool
+	// Hooks are optional callbacks the runtime fires at well-known
+	// points in the loop. Zero value (all nil fields) disables every
+	// hook with no overhead.
+	Hooks LifecycleHooks
+}
+
+// HookDecision is the outcome of a BeforeToolUse hook. Mirrors
+// tool.Decision so callers familiar with PermissionChecker get a
+// consistent shape: Allow=true permits the call to continue (still
+// subject to PermissionChecker); Allow=false denies it with Reason
+// surfaced as the tool result error.
+type HookDecision struct {
+	Allow  bool
+	Reason string
+}
+
+// LifecycleHooks bundles optional callbacks the runtime fires at
+// well-known points. All fields are nil-safe — leave a field nil and
+// that hook is skipped. Hooks run synchronously on the runtime
+// goroutine; expensive work should be deferred by the implementation.
+type LifecycleHooks struct {
+	// OnUserPromptSubmit fires once at the top of Run, BEFORE the
+	// user message is appended to the session. The hook may rewrite
+	// the prompt and/or images; the rewritten values are what the
+	// session and the LLM see. Returning err != nil aborts Run with
+	// EventError.
+	OnUserPromptSubmit func(ctx context.Context, prompt string, images []llm.ImageContent) (string, []llm.ImageContent, error)
+
+	// OnSessionStart fires once at the top of Run, AFTER the user
+	// message is appended to the session. Observe-only.
+	OnSessionStart func(ctx context.Context, sess *session.Session)
+
+	// BeforeToolUse fires inside dispatchTool / executeToolKickoff
+	// BEFORE PermissionChecker. Returning Allow=false denies the call
+	// with the given Reason (same shape as a PermissionChecker
+	// denial). Returning err != nil treats the call as a denial with
+	// err.Error() as the reason. nil → no-op (call proceeds).
+	BeforeToolUse func(ctx context.Context, toolName string, input json.RawMessage) (HookDecision, error)
+
+	// AfterToolUse fires after the tool's Execute returns (including
+	// on error or denial). Observe-only — no result rewrite.
+	AfterToolUse func(ctx context.Context, toolName string, input json.RawMessage, result tool.ToolResult)
+
+	// OnStop fires exactly once at the end of Run, regardless of
+	// outcome. reason is one of: "completed", "max_turns", "error",
+	// "aborted". Observe-only.
+	OnStop func(ctx context.Context, reason string)
 }
 
 // SkillProvider lets the runtime advertise the available skills in the

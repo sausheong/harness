@@ -80,6 +80,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "build runtime:", err)
 		os.Exit(1)
 	}
+	defer rt.Close() // no-op here (no MCP), but idiomatic
 
 	// 5. REPL loop.
 	in := bufio.NewScanner(os.Stdin)

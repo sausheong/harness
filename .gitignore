@@ -35,6 +35,10 @@
 *.swp
 *~
 
+# Example runtime artifacts (audit logs, scratch dirs, etc.)
+support-agent-audit.jsonl
+/_scratch/
+
 # Env
 .env
 .env.local

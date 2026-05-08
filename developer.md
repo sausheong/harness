@@ -12,37 +12,121 @@ on `github.com/sausheong/harness`.
 
 ## 1. Mental model
 
-A harness agent is four things composed together:
+There are two views worth holding in your head: **how a Runtime is
+composed** (what you assemble at boot) and **what one Run does** (the
+think-act loop that fires per user message).
+
+### Composition: what you wire to build a Runtime
+
+`runtime.BuildRuntime(deps, inputs, spec)` takes three arguments. The
+required pieces are inside `inputs`; everything in `deps` is optional;
+`spec` is per-agent config.
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                          runtime.Runtime                         │
-│                                                                  │
-│   user msg ──► [ provider ] ──► [ tool calls ] ──► assistant     │
-│       ▲             ▲                  ▲                ▲        │
-│       │             │                  │                │        │
-│       └────── Session (history) ───────┘                │        │
-│                                                         │        │
-│                              ┌──────────────────────────┘        │
-│                              ▼                                   │
-│                         AgentSpec                                │
-│                  (id, model, system prompt,                      │
-│                   max turns, workspace, …)                       │
-└──────────────────────────────────────────────────────────────────┘
+   ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+   │ llm.LLMProvider│  │ *tool.Registry │  │ *session.Session│
+   │ (anthropic /   │  │ (built-in tools│  │ (in-memory or   │
+   │  openai / …)   │  │  + your own)   │  │  JSONL-backed)  │
+   └────────┬───────┘  └────────┬───────┘  └────────┬───────┘
+            │                   │                   │
+            └────────┬──────────┴───────────────────┘
+                     ▼
+              RuntimeInputs                  ◄── required
+                     │
+                     │
+   RuntimeDeps  ────►├◄──── AgentSpec
+   (optional)        │      (id, name, model,
+   • Skills          │       workspace, MaxTurns,
+   • Memory          │       SystemPrompt,
+   • Permission      │       LoopConfig{Hooks…},
+   • KGFn            │       MCPServers, …)
+   • LifecycleHooks  │
+   • Compaction      │
+   • CalibratorStore │
+                     ▼
+            runtime.BuildRuntime
+                     │
+                     ▼
+              runtime.Runtime
+                     │
+                     │ events, _ := rt.Run(ctx, userMsg, images)
+                     ▼
+            <-chan runtime.AgentEvent
+        (EventTextDelta, EventToolCallStart,
+         EventToolResult, EventDone, EventError, EventAborted)
 ```
 
-* **`llm.LLMProvider`** — a streaming chat client (Anthropic / OpenAI /
-  Gemini / Qwen, or your own).
-* **`tool.Registry`** — the tools the LLM may invoke. Each tool is a Go
-  type implementing `tool.Tool`.
-* **`session.Session`** — append-only conversation history. In-memory by
-  default; attach a `*session.Store` to persist as JSONL on disk.
-* **`runtime.Runtime`** — the think-act loop. You build one with
-  `runtime.BuildRuntime(deps, inputs, spec)` and call `rt.Run(ctx, msg, nil)`
-  to drive a turn.
+The four mandatory pieces:
 
-Everything else (Skills, Memory, KnowledgeGraph, Permission, Compaction,
-Subagents) is **optional** — pass `nil` and it disappears.
+* **`llm.LLMProvider`** (in `RuntimeInputs.Provider`) — a streaming
+  chat client (Anthropic / OpenAI / Gemini / Qwen, or your own).
+* **`tool.Registry`** (in `RuntimeInputs.Tools`) — the tools the LLM
+  may invoke. Each tool implements `tool.Tool`.
+* **`session.Session`** (in `RuntimeInputs.Session`) — append-only
+  conversation history. In-memory by default; attach a
+  `*session.Store` to persist as JSONL on disk.
+* **`runtime.AgentSpec`** — per-agent identity (id, model, workspace,
+  system prompt, MaxTurns, LoopConfig, MCPServers).
+
+Everything in `RuntimeDeps` is optional. Leave a field zero (or pass
+`nil`) and the corresponding subsystem disappears.
+
+### Per-Run: what `rt.Run(ctx, msg, images)` actually does
+
+```
+   userMsg, images
+        │
+        ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │  Hooks.OnUserPromptSubmit  (may rewrite prompt/images)       │
+   │  Session.Append(user message)                                │
+   │  Hooks.OnSessionStart                                        │
+   │  KG.Recall (optional, ≤800ms cap)                            │
+   └──────────────────────────────────────────────────────────────┘
+        │
+        ▼
+   ┌── for turn := 0; turn < MaxTurns; turn++ ────────────────────┐
+   │                                                              │
+   │   Provider.ChatStream(messages, system, tools)               │
+   │              │                                               │
+   │              │  streams text + tool_use blocks               │
+   │              ▼                                               │
+   │   ┌─────────────────────────────────────────────┐            │
+   │   │  emit EventTextDelta as text arrives        │            │
+   │   │  collect tool_use blocks                    │            │
+   │   │  (StreamingTools? execute concurrency-safe  │            │
+   │   │   tools BEFORE stream ends)                 │            │
+   │   └─────────────────────────────────────────────┘            │
+   │              │                                               │
+   │              ▼                                               │
+   │   no tool calls? ───► emit EventDone, return                 │
+   │              │                                               │
+   │              ▼ tool calls present                            │
+   │                                                              │
+   │   partition into concurrency-safe batches                    │
+   │   for each batch (parallel up to MaxToolConcurrency):        │
+   │     • Hooks.BeforeToolUse  (may deny)                        │
+   │     • Permission.Check     (may deny)                        │
+   │     • tool.Execute                                           │
+   │     • Hooks.AfterToolUse   (observe)                         │
+   │     • Session.Append(tool_call + tool_result)                │
+   │     • emit EventToolResult                                   │
+   │                                                              │
+   │   loop: feed tool_results back to Provider for next turn     │
+   │                                                              │
+   └──────────────────────────────────────────────────────────────┘
+        │
+        ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │  Hooks.OnStop(reason)                                        │
+   │      reason ∈ {completed, max_turns, error, aborted}         │
+   │  KG.Ingest (deferred-async, optional)                        │
+   │  Compaction.MaybeCompactAsync (if near threshold)            │
+   └──────────────────────────────────────────────────────────────┘
+```
+
+This is what every section in the rest of this guide is hooking into
+or extending.
 
 ---
 
@@ -407,9 +491,10 @@ runtime relies on that to write paired session entries (especially when
 
 ```go
 type LoopConfig struct {
-    MaxToolConcurrency int   // 0 → env HARNESS_MAX_TOOL_CONCURRENCY → 10
-    MaxAgentDepth      int   // 0 → env HARNESS_MAX_AGENT_DEPTH      → 3
-    StreamingTools     bool  // false → env HARNESS_STREAMING_TOOLS=="1" → off
+    MaxToolConcurrency int            // 0 → env HARNESS_MAX_TOOL_CONCURRENCY → 10
+    MaxAgentDepth      int            // 0 → env HARNESS_MAX_AGENT_DEPTH      → 3
+    StreamingTools     bool           // false → env HARNESS_STREAMING_TOOLS=="1" → off
+    Hooks              LifecycleHooks // zero value = all hooks disabled
 }
 ```
 
@@ -426,6 +511,10 @@ type LoopConfig struct {
   executing as soon as the model finishes emitting their call, *while*
   the model is still streaming text. Latency win for I/O-bound tools;
   harmless to keep off until you measure that you need it.
+* **`Hooks`** — Lifecycle callbacks fired on key events
+  (user prompt submitted, tool about to run, tool result, run
+  finished). Use these for audit logging, dynamic gating, prompt
+  rewriting. See section 10 (`LifecycleHooks`) for the full surface.
 
 ---
 
@@ -549,6 +638,205 @@ deps.KGFn = func(model string) runtime.KnowledgeGraph { return &myKG{} }
 moves on; respect `ctx`. `Ingest` runs deferred-async with
 `context.Background()`.
 
+### Lifecycle hooks (`runtime.LifecycleHooks`)
+
+Five callback fields on `LoopConfig.Hooks`. Every field is optional;
+zero value disables the hook entirely. Hooks run **synchronously on
+the runtime goroutine** — keep them quick, defer heavy work yourself.
+
+```go
+deps.AgentLoop.Hooks = runtime.LifecycleHooks{
+    // Rewrite (or reject) the user's message before the loop sees it.
+    OnUserPromptSubmit: func(ctx context.Context, prompt string, imgs []llm.ImageContent) (string, []llm.ImageContent, error) {
+        return strings.TrimSpace(prompt), imgs, nil
+    },
+
+    // Fires once at Run start, after the user message is appended.
+    OnSessionStart: func(ctx context.Context, sess *session.Session) {
+        slog.Info("agent run started", "session", sess.Key)
+    },
+
+    // Fires BEFORE PermissionChecker. Returning Allow=false is a
+    // denial — same shape as a PermissionChecker denial.
+    BeforeToolUse: func(ctx context.Context, name string, input json.RawMessage) (runtime.HookDecision, error) {
+        if name == "bash" && businessHoursOnly() && !isBusinessHours() {
+            return runtime.HookDecision{Allow: false, Reason: "bash disabled outside business hours"}, nil
+        }
+        return runtime.HookDecision{Allow: true}, nil
+    },
+
+    // Fires AFTER Execute. Observe-only — perfect for audit trails.
+    AfterToolUse: func(ctx context.Context, name string, input json.RawMessage, res tool.ToolResult) {
+        auditLog.Record(name, input, res.Error == "")
+    },
+
+    // Fires once at Run end. reason ∈ {completed, max_turns, error, aborted}.
+    OnStop: func(ctx context.Context, reason string) {
+        metrics.AgentRuns.WithLabelValues(reason).Inc()
+    },
+}
+```
+
+Common uses:
+
+* **Audit logging** — `AfterToolUse` is the right place to write a
+  durable record of what the agent did. It fires on every tool call,
+  including denials and errors.
+* **Dynamic policy** — `BeforeToolUse` can deny based on runtime
+  state (time of day, user role, rate limits) that a static
+  `PermissionChecker` can't express.
+* **Prompt sanitization** — `OnUserPromptSubmit` can strip secrets,
+  expand short-codes, or redact PII before the message reaches the
+  LLM. The rewritten prompt is what gets persisted to the session.
+* **Metrics & tracing** — `OnStop`'s reason argument distinguishes
+  clean completions from aborts and max-turn timeouts.
+
+### MCP servers (`AgentSpec.MCPServers` / `tools/mcp`)
+
+Two ways to wire in an external MCP server. Both produce regular
+`tool.Tool`s namespaced as `mcp__<server>__<tool>`.
+
+**Declarative — let `BuildRuntime` do it:**
+
+```go
+import "github.com/sausheong/harness/tools/mcp"
+
+spec := runtime.AgentSpec{
+    ID: "demo", Name: "Demo", Model: "anthropic/claude-haiku-4-5-20251001",
+    MCPServers: []mcp.ServerConfig{
+        {
+            Name:    "fs",
+            Command: "npx",
+            Args:    []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+        },
+        {
+            Name: "github",
+            URL:  "https://mcp.example.com/github",
+        },
+    },
+}
+
+rt, err := runtime.BuildRuntime(deps, inputs, spec)
+if err != nil { /* connection failure */ }
+defer rt.Close() // releases all MCP sessions
+```
+
+`BuildRuntime` connects each server, lists its tools, registers each
+one into the agent's `*tool.Registry`, and stores the client handles
+on the Runtime so `Close` can release them. A connection failure on
+any server aborts `BuildRuntime` and tears down whatever was already
+connected — no half-built state.
+
+**Imperative — wire it yourself:**
+
+```go
+cli, err := mcp.Connect(ctx, mcp.ServerConfig{
+    Name: "fs", Command: "npx",
+    Args: []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"},
+})
+if err != nil { /* … */ }
+defer cli.Close()
+
+for _, t := range cli.Tools() {
+    reg.Register(t)
+}
+```
+
+Use this when you want full control over registration order, want to
+filter the server's tools, or want to keep one MCP client alive
+across many `Runtime`s.
+
+**Streamable HTTP with auth:**
+
+Most remote MCP servers need a bearer token or API key. `Headers` is
+attached to every outgoing request via a RoundTripper wrapper around
+`HTTPClient.Transport` — your custom client (mTLS, retries, etc.)
+still runs.
+
+```go
+mcp.ServerConfig{
+    Name: "github",
+    URL:  "https://mcp.githubmcp.com/v1",
+    Headers: map[string]string{
+        "Authorization": "Bearer " + os.Getenv("GITHUB_MCP_TOKEN"),
+        "X-Tenant":      "acme",
+    },
+    // Optional: full client control. Default is &http.Client{}.
+    HTTPClient: &http.Client{Timeout: 30 * time.Second},
+}
+```
+
+The wrapper clones each request before adding headers, so SDK retries
+see a clean request and your `Headers` map is read-only at runtime.
+
+**OAuth with auto-refresh (recommended for production):**
+
+For OAuth-protected MCP servers, the cleanest path is to use
+`golang.org/x/oauth2` to build an `*http.Client` whose transport
+handles token refresh automatically, then pass it via `HTTPClient`.
+The MCP transport sees a normal `*http.Client`; the oauth2 layer
+adds `Authorization: Bearer <token>` and refreshes when the token
+nears expiry.
+
+Client-credentials (M2M agent — no user in the loop):
+
+```go
+import "golang.org/x/oauth2/clientcredentials"
+
+cfg := clientcredentials.Config{
+    ClientID:     os.Getenv("CLIENT_ID"),
+    ClientSecret: os.Getenv("CLIENT_SECRET"),
+    TokenURL:     "https://auth.example.com/oauth/token",
+    Scopes:       []string{"mcp:read", "mcp:write"},
+}
+
+mcp.ServerConfig{
+    Name:       "internal",
+    URL:        "https://mcp.example.com",
+    HTTPClient: cfg.Client(ctx), // auto-fetches + refreshes
+}
+```
+
+Authorization code with refresh token (you've already done the user
+handshake elsewhere and held onto the refresh token):
+
+```go
+import "golang.org/x/oauth2"
+
+ts := myProvider.TokenSource(ctx, &oauth2.Token{
+    AccessToken:  accessToken,
+    RefreshToken: refreshToken,
+    Expiry:       expiry,
+})
+mcp.ServerConfig{
+    Name:       "remote",
+    URL:        "https://mcp.example.com",
+    HTTPClient: oauth2.NewClient(ctx, ts),
+}
+```
+
+Both keep the OAuth lifecycle out of `tools/mcp` and let the
+canonical `golang.org/x/oauth2` package own it. The MCP-spec OAuth
+handshake (server-driven discovery + dynamic client registration +
+PKCE) is **not** wired through `ServerConfig` today — if you hit a
+server that requires it, drop down to the SDK's `auth` / `oauthex`
+packages and register tools imperatively.
+
+A few notes:
+
+* The official `github.com/modelcontextprotocol/go-sdk` v1.5.0+ is
+  the underlying transport. Stdio (`Command + Args + Env`) and
+  Streamable HTTP (`URL` + optional `Headers` / `HTTPClient`) are
+  both supported; the package picks the right transport from the
+  fields you set.
+* MCP tools default to `IsConcurrencySafe=false` because MCP doesn't
+  expose a per-tool safety hint. Wrap the adapter if you know a
+  specific tool is read-only and want it in the parallel batch.
+* MCP `IsError` results surface as `tool.ToolResult.Error` so the
+  agent sees them the same way it sees a harness-native tool error.
+* `Runtime.Close()` is idempotent and safe to call when no MCP
+  servers were declared — useful as a default `defer`.
+
 ---
 
 ## 11. Common patterns
@@ -625,11 +913,19 @@ func(id string) (runtime.SubagentSpec, bool) {
   open-data APIs (`data.gov.sg`). Includes a `//go:build live` smoke test
   showing how to test custom tools against real endpoints without
   blocking `go test ./...`.
+* **`examples/support-agent/`** — `SkillProvider` + `PermissionChecker`
+  + `LifecycleHooks` (`AfterToolUse` audit trail) all wired into one
+  agent. Closest pattern to copy if you're building a real product.
 * **`runtime/types.go`** — every interface a consumer can implement
-  (`SkillProvider`, `MemoryProvider`, `KnowledgeGraph`,
-  `SubagentResolver`) is defined here with full doc comments.
+  (`LifecycleHooks`, `HookDecision`, `SkillProvider`, `MemoryProvider`,
+  `KnowledgeGraph`, `SubagentResolver`) is defined here with full doc
+  comments.
 * **`tool/tool.go`** — the `Tool`, `Executor`, `Registry`, `ToolResult`
   surface. Read it before writing anything non-trivial.
+* **`tools/mcp/`** — the MCP adapter package. `mcp.go` shows the
+  Connect / Close lifecycle, `adapter.go` shows the
+  `tool.Tool` ↔ MCP CallTool translation, `mcp_test.go` shows how to
+  drive it with an in-process MCP server for tests.
 * **`compaction/compaction.go`** — if you want to understand exactly what
   triggers a compaction and what survives one.
 
