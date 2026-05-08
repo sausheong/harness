@@ -5,8 +5,8 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: pre-1.0.** The `runtime` API surface is still being shaped
-> — expect breaking changes until a `v0.1.0` tag.
+> **Status: v0.1.0.** First tagged release. The `runtime` API
+> surface may still shift in the v0.x line — pin your version.
 
 ## Why harness
 
@@ -309,8 +309,15 @@ a real failure.
 
 ## Status
 
-Pre-1.0. The `runtime` API surface is still being shaped; expect
-breaking changes until a `v0.1.0` tag. Specifically:
+`v0.1.0` is the first tagged release. The v0.x line follows Go
+module semver: minor bumps may break API, patch bumps are bug-fix
+only. Pin your dependency:
+
+```bash
+go get github.com/sausheong/harness@v0.1.0
+```
+
+Likely sources of v0.x churn before a v1.0.0:
 
 - `RuntimeDeps` / `RuntimeInputs` / `AgentSpec` field names may
   shift as new optional plug-points land.
@@ -320,8 +327,8 @@ breaking changes until a `v0.1.0` tag. Specifically:
 - The `tools/mcp` package's `ServerConfig` may grow new fields for
   the MCP-spec OAuth handshake.
 
-Tagged releases will follow the usual Go module semver discipline
-once the v0.x line stabilizes.
+See [GitHub releases](https://github.com/sausheong/harness/releases)
+for the changelog of each tagged version.
 
 ## License
 
