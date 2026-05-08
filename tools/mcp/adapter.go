@@ -20,9 +20,8 @@ type mcpToolAdapter struct {
 }
 
 // Name returns "mcp__<server>__<tool>". The double-underscore
-// namespacing matches Claude Code so the LLM treats these tools the
-// same way it would in CC and so they can't collide with built-in
-// harness tools.
+// namespacing prevents collisions with built-in harness tools and
+// is the convention most agent harnesses use for MCP-sourced tools.
 func (a *mcpToolAdapter) Name() string {
 	return "mcp__" + a.serverName + "__" + a.sdkTool.Name
 }

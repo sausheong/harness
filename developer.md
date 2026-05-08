@@ -362,8 +362,8 @@ reg.Register(&EnvTool{})
 
 ### Returning images
 
-Vision-capable models (Claude, GPT-4o, Gemini) can see images returned
-from a tool. Set `ToolResult.Images`:
+Vision-capable models can see images returned from a tool. Set
+`ToolResult.Images`:
 
 ```go
 return tool.ToolResult{

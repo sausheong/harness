@@ -14,7 +14,7 @@ import (
 //  3. Otherwise off.
 //
 // Strict "1" for the env fallback (rather than truthy parsing) keeps the
-// env contract simple and matches Claude Code's binary-feature-gate posture.
+// env contract simple and unambiguous.
 // Note: an explicit `false` in JSON5 behaves the same as the field being
 // absent — to disable, leave both unset.
 func (r *Runtime) streamingToolsEnabled() bool {

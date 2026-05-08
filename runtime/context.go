@@ -501,8 +501,8 @@ func FormatDateLine(now time.Time) string {
 
 // PostCompactRestoreFiles caps how many recently-touched files
 // buildPostCompactRestore re-injects after a successful compaction.
-// 5 mirrors Claude Code's harness behaviour (harness.md §3) and keeps
-// the restore message bounded.
+// 5 keeps the restore message bounded while covering the typical
+// "the last few files I was working on" recall horizon.
 const PostCompactRestoreFiles = 5
 
 // PostCompactRestoreBytesPerFile bounds the per-file byte budget for
@@ -542,7 +542,7 @@ func extractPathFromInput(raw []byte) string {
 //
 // Format is wrapped in <system-reminder>...<file path="...">...</file>
 // tags so the model recognises it as out-of-band context, not a fresh
-// user request. Mirrors how Claude Code re-injects POST_COMPACT files.
+// user request.
 func buildPostCompactRestore(files []string, maxFiles, maxBytesPerFile int) llm.Message {
 	if len(files) == 0 || maxFiles <= 0 || maxBytesPerFile <= 0 {
 		return llm.Message{}

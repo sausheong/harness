@@ -19,9 +19,6 @@ import (
 // The breaker resets on any genuine summarizer success (stage 1 or 2
 // returning real content). It exists to prevent a session whose context
 // is irrecoverably over the limit from hammering the API on every turn.
-//
-// Pattern from Claude Code MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
-// (src/services/compact/autoCompact.ts:67-70).
 const MaxConsecutiveFailures = 3
 
 // Reason identifies why compaction was triggered.

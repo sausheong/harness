@@ -57,9 +57,6 @@ func transcriptDelimiterSuffix() string {
 //   - The <analysis> block is a drafting scratchpad (stripped before
 //     injection by FormatCompactSummary). It improves summary quality on
 //     small models without polluting the resulting context.
-//
-// Pattern adapted from Claude Code's BASE_COMPACT_PROMPT
-// (claude-code-source/src/services/compact/prompt.ts:61-143).
 const summarizationPromptHeader = `You are summarizing an AI assistant's conversation so it can continue past the context window.
 
 CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. The output must be an <analysis> block followed by a <summary> block — nothing else.
@@ -247,9 +244,6 @@ var blankLineCollapseRE = regexp.MustCompile(`\n{3,}`)
 // returned as-is so we never silently drop content. Multiple <summary>
 // blocks (rare, but possible) are each unwrapped consistently so no literal
 // tags leak into the injected context.
-//
-// Pattern adapted from Claude Code's formatCompactSummary
-// (claude-code-source/src/services/compact/prompt.ts:311-335).
 func FormatCompactSummary(raw string) string {
 	out := analysisBlockRE.ReplaceAllString(raw, "")
 

@@ -35,8 +35,8 @@ import (
 // (Streamable HTTP via the SDK's StreamableClientTransport).
 type ServerConfig struct {
 	// Name namespaces the server's tools. Adapter tool names become
-	// "mcp__<Name>__<tool>", matching Claude Code's convention so the
-	// LLM treats them the same way.
+	// "mcp__<Name>__<tool>" — the conventional double-underscore
+	// scheme that prevents collisions with built-in tools.
 	Name string
 
 	// Command + Args + Env wire the stdio transport. Env is merged into

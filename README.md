@@ -221,10 +221,10 @@ Deliberately not in scope (numbers from the same conceptual list):
   valid.
 - **Compaction at a clean boundary.** `compaction.Split` walks
   backward counting user messages and cuts at one — never inside a
-  tool-call/tool-result pair. The prompt itself (`compaction/prompt.go`)
-  is adapted from Claude Code's `BASE_COMPACT_PROMPT` and emits a
-  9-section structured summary inside an `<analysis>` + `<summary>`
-  envelope; the `<analysis>` block is stripped before re-injection.
+  tool-call/tool-result pair. The prompt (`compaction/prompt.go`)
+  emits a 9-section structured summary inside an `<analysis>` +
+  `<summary>` envelope; the `<analysis>` block is stripped before
+  re-injection.
 - **Plug-points are nil-friendly.** `MemoryProvider`,
   `KnowledgeGraph`, `SkillProvider`, `SubagentResolver`,
   `PermissionChecker`, `LifecycleHooks`, and `session.Store` are all
@@ -284,8 +284,9 @@ these, you'll need to bring them yourself or layer them on top:
 - **Auth / billing / multi-tenant infrastructure.** Per-agent
   policy lives in `PermissionChecker`; everything else is your
   problem.
-- **Shell-command hooks (Claude Code style).** Hooks are typed Go
-  callbacks on `LifecycleHooks`, not subprocess invocations.
+- **Shell-command hooks.** Hooks are typed Go callbacks on
+  `LifecycleHooks`, not subprocess invocations driven by a config
+  file.
 
 ## Testing
 
