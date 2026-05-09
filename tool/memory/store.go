@@ -6,9 +6,11 @@
 // The MemoryTool in tool.go wraps any MemoryStore implementation as a
 // tool.Tool the agent can call. The default disk-backed implementation
 // lives in tool/memory/jsonl/ — that package's *Store value satisfies
-// both MemoryStore (writes) and runtime.MemoryProvider (reads), so one
-// instance can serve as the system-prompt index source, the foreground
-// memory tool's backend, AND the review-pass tool's backend.
+// MemoryStore directly, and satisfies runtime.MemoryProvider via
+// Store.AsMemoryProvider() which returns a small wrapper that adapts
+// the read signature. One underlying *Store can therefore serve as the
+// system-prompt index source, the foreground memory tool's backend,
+// AND the review-pass tool's backend.
 package memory
 
 import (

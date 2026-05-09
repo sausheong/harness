@@ -350,6 +350,16 @@ func TestStore_PatchUnknownReturnsErrNotFound(t *testing.T) {
 	require.ErrorIs(t, err, skills.ErrNotFound)
 }
 
+func TestStore_PatchUnknownTakesPrecedenceOverIdentical(t *testing.T) {
+	// Patch on a missing skill with old==new must return ErrNotFound,
+	// not ErrPatchIdentical — so the model gets the actionable error.
+	dir := t.TempDir()
+	s := NewStore(dir)
+	_, err := s.Patch(context.Background(), "ghost", "x", "x")
+	require.ErrorIs(t, err, skills.ErrNotFound)
+	require.NotErrorIs(t, err, skills.ErrPatchIdentical)
+}
+
 func TestStore_PatchRejectsInvalidName(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)
@@ -390,7 +400,7 @@ func TestStore_ConcurrentPatchesDoNotInterleave(t *testing.T) {
 	// Body has 20 distinct sentinels: M00, M01, ..., M19.
 	var b strings.Builder
 	b.WriteString("---\ndescription: race test.\n---\n\n")
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		fmt.Fprintf(&b, "M%02d\n", i)
 	}
 	_, err := s.Create(context.Background(), skills.Skill{Name: "race", Body: b.String()})
@@ -399,12 +409,12 @@ func TestStore_ConcurrentPatchesDoNotInterleave(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(20)
 	errs := make(chan error, 20)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		go func(i int) {
 			defer wg.Done()
 			old := fmt.Sprintf("M%02d", i)
-			new := fmt.Sprintf("X%02d", i)
-			if _, err := s.Patch(context.Background(), "race", old, new); err != nil {
+			replacement := fmt.Sprintf("X%02d", i)
+			if _, err := s.Patch(context.Background(), "race", old, replacement); err != nil {
 				errs <- err
 			}
 		}(i)
@@ -418,7 +428,7 @@ func TestStore_ConcurrentPatchesDoNotInterleave(t *testing.T) {
 	got, ok, err := s.Get(context.Background(), "race")
 	require.NoError(t, err)
 	require.True(t, ok)
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		assert.NotContains(t, got.Body, fmt.Sprintf("M%02d", i),
 			"sentinel M%02d should have been patched", i)
 		assert.Contains(t, got.Body, fmt.Sprintf("X%02d", i),
@@ -436,7 +446,7 @@ func TestStore_ConcurrentCreatesDoNotDoubleWrite(t *testing.T) {
 	wg.Add(10)
 	successes := make(chan struct{}, 10)
 	conflicts := make(chan struct{}, 10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
 			defer wg.Done()
 			_, err := s.Create(context.Background(), skills.Skill{

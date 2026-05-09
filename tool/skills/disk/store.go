@@ -147,13 +147,9 @@ func stripFrontmatter(body string) string {
 		return body
 	}
 	rest := body[4:]
-	if i := strings.Index(rest, "\n---\n"); i >= 0 {
-		s := rest[i+5:]
+	if _, after, ok := strings.Cut(rest, "\n---\n"); ok {
 		// Eat one optional leading blank line after the closing fence.
-		if strings.HasPrefix(s, "\n") {
-			s = s[1:]
-		}
-		return s
+		return strings.TrimPrefix(after, "\n")
 	}
 	if i := strings.Index(rest, "\n---"); i >= 0 && i == len(rest)-4 {
 		return ""
@@ -223,32 +219,27 @@ func parseFrontmatter(body string) (frontmatter, string) {
 		return frontmatter{}, body
 	}
 	rest := body[4:]
-	end := strings.Index(rest, "\n---\n")
-	var afterFM string
-	var fmText string
-	switch {
-	case end >= 0:
-		fmText = rest[:end]
-		afterFM = rest[end+5:]
-	case strings.HasSuffix(rest, "\n---"):
+	var fmText, afterFM string
+	if before, after, ok := strings.Cut(rest, "\n---\n"); ok {
+		fmText = before
+		afterFM = after
+	} else if strings.HasSuffix(rest, "\n---") {
 		fmText = rest[:len(rest)-4]
 		afterFM = ""
-	default:
+	} else {
 		return frontmatter{}, body
 	}
-	if strings.HasPrefix(afterFM, "\n") {
-		afterFM = afterFM[1:]
-	}
+	afterFM = strings.TrimPrefix(afterFM, "\n")
 
 	var fm frontmatter
-	for _, line := range strings.Split(fmText, "\n") {
+	for line := range strings.SplitSeq(fmText, "\n") {
 		line = strings.TrimRight(line, "\r")
-		idx := strings.Index(line, ":")
-		if idx < 0 {
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
 		switch key {
 		case "description":
 			fm.Description = val
@@ -302,9 +293,6 @@ func (s *Store) Patch(ctx context.Context, name, oldContent, newContent string) 
 	if !skills.ValidName(name) {
 		return skills.Skill{}, fmt.Errorf("%w: %q", skills.ErrInvalidName, name)
 	}
-	if oldContent == newContent {
-		return skills.Skill{}, skills.ErrPatchIdentical
-	}
 
 	lock := s.lockFor(name)
 	lock.Lock()
@@ -316,6 +304,9 @@ func (s *Store) Patch(ctx context.Context, name, oldContent, newContent string) 
 	}
 	if !ok {
 		return skills.Skill{}, fmt.Errorf("%w: %q", skills.ErrNotFound, name)
+	}
+	if oldContent == newContent {
+		return skills.Skill{}, skills.ErrPatchIdentical
 	}
 
 	count := strings.Count(existing.Body, oldContent)

@@ -6,9 +6,12 @@
 // The SkillTool in tool.go wraps any SkillStore implementation as a
 // tool.Tool the agent can call. The default disk-backed implementation
 // lives in tool/skills/disk/ — that package's *Store value satisfies
-// both SkillStore (writes) and runtime.SkillProvider (reads), so one
-// instance can serve as the system-prompt index source, the foreground
-// skill tool's backend, AND the review-pass tool's backend.
+// SkillStore directly, and satisfies runtime.SkillProvider via
+// Store.AsSkillProvider() which returns a small wrapper that adapts
+// the Get signature ((Skill, bool, error) → (string, bool)). One
+// underlying *Store can therefore serve as the system-prompt index
+// source, the foreground skill tool's backend, AND the review-pass
+// tool's backend.
 //
 // Skill names are kebab-case and validated by ValidName: lowercase
 // letters and digits, hyphen-separated, 1–64 chars, no leading hyphen,
@@ -25,8 +28,9 @@ import (
 
 // Skill is one durable procedural-knowledge record. Name is the stable
 // identifier (and primary key); Body is the full SKILL.md content
-// including any frontmatter. Description is auto-derived from
-// frontmatter on Save (read-only by callers); the store sets it.
+// including any frontmatter. Description is taken from the
+// caller-supplied field when set; otherwise the store derives it from
+// the body's frontmatter `description:` line.
 type Skill struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description,omitempty"`

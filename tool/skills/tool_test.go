@@ -18,7 +18,7 @@ func TestSkillTool_NameDescriptionSchema(t *testing.T) {
 
 	var schema struct {
 		Type       string                 `json:"type"`
-		Properties map[string]interface{} `json:"properties"`
+		Properties map[string]any         `json:"properties"`
 		Required   []string               `json:"required"`
 	}
 	require.NoError(t, json.Unmarshal(tool.Parameters(), &schema))
