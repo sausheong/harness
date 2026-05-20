@@ -364,7 +364,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			msgs := assembleMessages(history)
 
 			spillCfg := spillConfig{Workspace: r.Workspace, SessionKey: r.Session.Key}
-			pruneToolResults(msgs, maxToolResultLen, spillCfg)
+			pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
 
 			toolDefs := r.Tools.ToolDefs()
 			if r.Permission != nil {
@@ -390,7 +390,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 					history = r.Session.View()
 					msgs = assembleMessages(history)
-					pruneToolResults(msgs, maxToolResultLen, spillCfg)
+					pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
 					msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 				}
 			}
@@ -416,7 +416,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, maxToolResultLen, spillCfg)
+						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 					} else {
 						r.emit(AgentEvent{Type: EventCompactionSkipped, Compaction: &res})
@@ -449,7 +449,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, maxToolResultLen, spillCfg)
+						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 						req.Messages = msgs
 						stream, err = r.LLM.ChatStream(ctx, req)
