@@ -71,6 +71,14 @@ type LoopConfig struct {
 	// StreamingTools enables mid-stream concurrency-safe tool kickoff.
 	// false ⇒ env fallback (HARNESS_STREAMING_TOOLS=1) then off.
 	StreamingTools bool
+	// MaxToolResultLen caps the in-context length of any single tool
+	// result; longer results are truncated to their first MaxToolResultLen
+	// chars (cut at a newline boundary) with the remainder either spilled
+	// to disk via spillConfig or simply dropped. 0 ⇒ env fallback
+	// (HARNESS_MAX_TOOL_RESULT_LEN) then default 4000. Common pick for
+	// engineering-style agents (reading source files, running tests) is
+	// 16000-25000.
+	MaxToolResultLen int
 	// Hooks are optional callbacks the runtime fires at well-known
 	// points in the loop. Zero value (all nil fields) disables every
 	// hook with no overhead.
