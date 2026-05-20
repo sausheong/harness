@@ -13,7 +13,12 @@ import (
 	"github.com/sausheong/harness/session"
 )
 
-const maxToolResultLen = 4000 // truncate tool results longer than this
+// defaultMaxToolResultLen is the fallback cap used when LoopConfig.MaxToolResultLen
+// is unset and the HARNESS_MAX_TOOL_RESULT_LEN env var is unset/invalid. Tool
+// results longer than this get truncated (or spilled to disk + truncated-with-
+// marker when spillConfig is supplied). 4000 chars (~1000 tokens) is conservative
+// so behaviour is unchanged for callers that don't opt into a larger budget.
+const defaultMaxToolResultLen = 4000
 
 // detectImageMIME returns the actual MIME type based on magic bytes.
 // Falls back to the provided hint if the format is unrecognized.
