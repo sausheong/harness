@@ -107,3 +107,59 @@ func TestRunTurn_ToolCall_NotDone_ThenDone(t *testing.T) {
 	require.True(t, res2.Done, "second turn (no tool calls) should be terminal")
 	require.Equal(t, "completed", res2.StopReason)
 }
+
+// TestRunTurn_LLMError: the provider emits a mid-stream EventError. RunTurn
+// does NOT use Run's stream-fallback path, so the error surfaces directly:
+// the turn is terminal with StopReason "error" and a non-nil Err.
+//
+// Note on the fake: scriptedStreamLLM's scriptedStreamEvent cannot carry an
+// error value (it has no error field), so it cannot emit a meaningful
+// EventError. We reuse streamingOnlyProvider from streamfallback_test.go —
+// the same-package fake the streaming tests use to simulate a mid-stream
+// error (text delta then EventError with a real error).
+func TestRunTurn_LLMError(t *testing.T) {
+	llmProvider := &streamingOnlyProvider{}
+
+	rt := &Runtime{
+		LLM:     llmProvider,
+		Tools:   newEchoRegistry(),
+		Session: session.NewSession("a", "k"),
+		AgentID: "a",
+		Model:   "test",
+	}
+
+	res, err := rt.RunTurn(context.Background(), "do it", nil, nil)
+	require.NoError(t, err, "RunTurn surfaces stream errors via TurnResult.Err, not its own error return")
+	require.True(t, res.Done, "an errored turn must be terminal")
+	require.Equal(t, "error", res.StopReason)
+	require.Error(t, res.Err)
+	require.EqualValues(t, 1, llmProvider.streamCalls.Load(), "stream hit exactly once (no fallback in RunTurn)")
+}
+
+// TestRunTurn_PreCancelledContext: a context cancelled before RunTurn runs
+// must short-circuit to an aborted turn with a non-nil Err, and the LLM must
+// never be called. scriptedStreamLLM exposes a `calls` counter, so we assert
+// the provider was never invoked.
+func TestRunTurn_PreCancelledContext(t *testing.T) {
+	llmProvider := &scriptedStreamLLM{events: []scriptedStreamEvent{
+		{typ: llm.EventTextDelta, text: "should never run"},
+		{typ: llm.EventDone},
+	}}
+
+	rt := &Runtime{
+		LLM:     llmProvider,
+		Tools:   newEchoRegistry(),
+		Session: session.NewSession("a", "k"),
+		AgentID: "a",
+		Model:   "test",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := rt.RunTurn(ctx, "hi", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", res.StopReason)
+	require.Error(t, res.Err)
+	require.EqualValues(t, 0, llmProvider.calls.Load(), "LLM must not be called when context is pre-cancelled")
+}
