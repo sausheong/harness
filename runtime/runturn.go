@@ -25,13 +25,17 @@ type TurnResult struct {
 type TurnEmit func(AgentEvent)
 
 // RunTurn executes exactly one turn of the agent loop against the current
-// session and returns the entries it produced. First call of a session passes
-// the user message; continuation calls pass "".
+// session and returns the entries it produced. The first call of a session
+// passes the user message; continuation calls pass "".
 //
-// RunTurn deliberately omits compaction, knowledge-graph ingest/recall, and
-// the streaming-tool kickoff that Run performs — those concerns stay in Run.
-// It reuses the same tested helpers (assembleMessages, dispatchTool,
-// partitionToolCalls) so its per-turn behavior matches Run's.
+// RunTurn is the durable unit for a per-turn driver: each call can be wrapped
+// as a checkpointed step whose return value (TurnResult.Entries) rebuilds
+// session state on replay. It differs from Run by design: it is headless
+// (live events go only through the emit callback, never an internal channel),
+// it dispatches tool calls serially (Run parallelizes concurrency-safe
+// batches), and it does NOT perform compaction, knowledge-graph recall/ingest,
+// streaming-tool kickoff, or the trace/slog emissions that Run's emitToolResult
+// produces. Those remain Run's responsibility.
 func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.ImageContent, emit TurnEmit) (TurnResult, error) {
 	if emit == nil {
 		emit = func(AgentEvent) {}
@@ -122,14 +126,15 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 		return r.turnSlice(startLen, true, "completed", lastUsage, nil), nil
 	}
 
-	batches := partitionToolCalls(toolCalls, r.Tools)
-	for _, b := range batches {
-		for _, tc := range b.calls {
-			result, aborted := r.dispatchTool(ctx, tc, nil)
-			emit(AgentEvent{Type: EventToolResult, ToolCall: &tc, Result: &result})
-			if aborted {
-				return r.turnSlice(startLen, true, "aborted", lastUsage, nil), nil
-			}
+	// RunTurn dispatches tool calls serially by design: deterministic
+	// ordering keeps durable replay simple, and parallel/concurrency-safe
+	// batching deliberately stays in Run (see the doc comment). dispatchTool
+	// appends the tool_call and tool_result entries to the session.
+	for _, tc := range toolCalls {
+		result, aborted := r.dispatchTool(ctx, tc, nil)
+		emit(AgentEvent{Type: EventToolResult, ToolCall: &tc, Result: &result})
+		if aborted {
+			return r.turnSlice(startLen, true, "aborted", lastUsage, ctx.Err()), nil
 		}
 	}
 
@@ -137,6 +142,9 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 }
 
 // turnSlice builds a TurnResult from the entries appended since startLen.
+// It assumes a single active turn per session: the delta entries[startLen:]
+// is correct only because no other goroutine appends to this session
+// concurrently during the turn.
 func (r *Runtime) turnSlice(startLen int, done bool, reason string, usage *llm.Usage, err error) TurnResult {
 	all := r.Session.Entries()
 	var delta []session.SessionEntry
