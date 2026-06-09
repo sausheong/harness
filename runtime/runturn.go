@@ -161,6 +161,8 @@ func (r *Runtime) turnSlice(startLen int, done bool, reason string, usage *llm.U
 // (assistant), tool results as their output or "[error] <err>" (user).
 // Compaction/meta and non-user/assistant message entries are skipped — the
 // thread carries only conversation turns and tool exchanges.
+// On the runtime's per-turn serve path each call sees one turn's fresh session,
+// so a compaction summary's absence here is intentional, not a gap.
 func sessionThread(history []session.SessionEntry) []Message {
 	var thread []Message
 	for _, e := range history {
