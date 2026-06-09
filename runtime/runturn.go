@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -152,4 +153,47 @@ func (r *Runtime) turnSlice(startLen int, done bool, reason string, usage *llm.U
 		delta = append(delta, all[startLen:]...)
 	}
 	return TurnResult{Done: done, StopReason: reason, Entries: delta, Usage: usage, Err: err}
+}
+
+// sessionThread converts session history into the minimal []Message the
+// KnowledgeGraph ingests, mirroring how Run accumulates its thread: user and
+// assistant messages by role+text, tool calls as "[tool: name]\n<input>"
+// (assistant), tool results as their output or "[error] <err>" (user).
+// Compaction/meta and non-user/assistant message entries are skipped — the
+// thread carries only conversation turns and tool exchanges.
+func sessionThread(history []session.SessionEntry) []Message {
+	var thread []Message
+	for _, e := range history {
+		switch e.Type {
+		case session.EntryTypeMessage:
+			if e.Role != "user" && e.Role != "assistant" {
+				continue // skip system/summary messages
+			}
+			var d session.MessageData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			thread = append(thread, Message{Role: e.Role, Content: d.Text})
+		case session.EntryTypeToolCall:
+			var d session.ToolCallData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			thread = append(thread, Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("[tool: %s]\n%s", d.Tool, string(d.Input)),
+			})
+		case session.EntryTypeToolResult:
+			var d session.ToolResultData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			content := d.Output
+			if d.Error != "" {
+				content = "[error] " + d.Error
+			}
+			thread = append(thread, Message{Role: "user", Content: content})
+		}
+	}
+	return thread
 }
