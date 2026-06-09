@@ -140,7 +140,12 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 		// Exchange complete: ingest the full thread once. Background + best-effort
 		// (the KG spawns its own bounded goroutine), so it never delays the turn.
 		// context.Background() because the request ctx may be cancelling and the
-		// ingest goroutine deliberately outlives the turn.
+		// ingest goroutine deliberately outlives the turn. Unlike Run, RunTurn does
+		// not pre-filter trivial threads or gate on IngestSource: the KG impl owns
+		// its own growth gate (so single-message threads are skipped there), and the
+		// only RunTurn caller today is the chat serve loop. TODO: if a reviewer or
+		// subagent path is ever migrated to RunTurn, add an IngestSource-style gate
+		// here so non-chat transcripts are not ingested.
 		if r.KG != nil {
 			r.KG.Ingest(context.Background(), sessionThread(r.Session.View()))
 		}
