@@ -35,9 +35,11 @@ type TurnEmit func(AgentEvent)
 // session state on replay. It differs from Run by design: it is headless
 // (live events go only through the emit callback, never an internal channel),
 // it dispatches tool calls serially (Run parallelizes concurrency-safe
-// batches), and it does NOT perform compaction, knowledge-graph recall/ingest,
-// streaming-tool kickoff, or the trace/slog emissions that Run's emitToolResult
-// produces. Those remain Run's responsibility.
+// batches), and it does NOT perform compaction, streaming-tool kickoff, or the
+// trace/slog emissions that Run's emitToolResult produces (those remain Run's
+// responsibility). It DOES perform bounded-synchronous knowledge-graph recall on
+// the first round of an exchange (folding the hint into the system prompt) and
+// async knowledge-graph ingest on the completing round.
 func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.ImageContent, emit TurnEmit) (TurnResult, error) {
 	if emit == nil {
 		emit = func(AgentEvent) {}
