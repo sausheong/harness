@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
@@ -71,7 +72,20 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	sort.SliceStable(toolDefs, func(i, j int) bool { return toolDefs[i].Name < toolDefs[j].Name })
 	toolDefs, _ = r.LLM.NormalizeToolSchema(toolDefs)
 
+	// KG recall (first round of the exchange only): bounded-synchronous so a
+	// slow embedder cannot stall the turn. The hint is a non-cached suffix —
+	// it varies per query, so caching it would poison the static prefix cache.
+	var kgHint string
+	if r.KG != nil && (userMsg != "" || len(images) > 0) && r.KG.ShouldRecall(userMsg) {
+		rctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+		kgHint = r.KG.Recall(rctx, userMsg)
+		cancel()
+	}
+
 	parts := []llm.SystemPromptPart{{Text: r.StaticSystemPrompt, Cache: true}}
+	if kgHint != "" {
+		parts = append(parts, llm.SystemPromptPart{Text: kgHint, Cache: false})
+	}
 	req := llm.ChatRequest{
 		Model:             r.Model,
 		Messages:          msgs,
