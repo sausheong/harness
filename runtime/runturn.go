@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
@@ -33,9 +35,11 @@ type TurnEmit func(AgentEvent)
 // session state on replay. It differs from Run by design: it is headless
 // (live events go only through the emit callback, never an internal channel),
 // it dispatches tool calls serially (Run parallelizes concurrency-safe
-// batches), and it does NOT perform compaction, knowledge-graph recall/ingest,
-// streaming-tool kickoff, or the trace/slog emissions that Run's emitToolResult
-// produces. Those remain Run's responsibility.
+// batches), and it does NOT perform compaction, streaming-tool kickoff, or the
+// trace/slog emissions that Run's emitToolResult produces (those remain Run's
+// responsibility). It DOES perform bounded-synchronous knowledge-graph recall on
+// the first round of an exchange (folding the hint into the system prompt) and
+// async knowledge-graph ingest on the completing round.
 func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.ImageContent, emit TurnEmit) (TurnResult, error) {
 	if emit == nil {
 		emit = func(AgentEvent) {}
@@ -70,7 +74,20 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	sort.SliceStable(toolDefs, func(i, j int) bool { return toolDefs[i].Name < toolDefs[j].Name })
 	toolDefs, _ = r.LLM.NormalizeToolSchema(toolDefs)
 
+	// KG recall (first round of the exchange only): bounded-synchronous so a
+	// slow embedder cannot stall the turn. The hint is a non-cached suffix —
+	// it varies per query, so caching it would poison the static prefix cache.
+	var kgHint string
+	if r.KG != nil && (userMsg != "" || len(images) > 0) && r.KG.ShouldRecall(userMsg) {
+		rctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+		kgHint = r.KG.Recall(rctx, userMsg)
+		cancel()
+	}
+
 	parts := []llm.SystemPromptPart{{Text: r.StaticSystemPrompt, Cache: true}}
+	if kgHint != "" {
+		parts = append(parts, llm.SystemPromptPart{Text: kgHint, Cache: false})
+	}
 	req := llm.ChatRequest{
 		Model:             r.Model,
 		Messages:          msgs,
@@ -122,6 +139,18 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	}
 
 	if len(toolCalls) == 0 {
+		// Exchange complete: ingest the full thread once. Background + best-effort
+		// (the KG spawns its own bounded goroutine), so it never delays the turn.
+		// context.Background() because the request ctx may be cancelling and the
+		// ingest goroutine deliberately outlives the turn. Unlike Run, RunTurn does
+		// not pre-filter trivial threads or gate on IngestSource: the KG impl owns
+		// its own growth gate (so single-message threads are skipped there), and the
+		// only RunTurn caller today is the chat serve loop. TODO: if a reviewer or
+		// subagent path is ever migrated to RunTurn, add an IngestSource-style gate
+		// here so non-chat transcripts are not ingested.
+		if r.KG != nil {
+			r.KG.Ingest(context.Background(), sessionThread(r.Session.View()))
+		}
 		emit(AgentEvent{Type: EventDone, Usage: lastUsage})
 		return r.turnSlice(startLen, true, "completed", lastUsage, nil), nil
 	}
@@ -152,4 +181,49 @@ func (r *Runtime) turnSlice(startLen int, done bool, reason string, usage *llm.U
 		delta = append(delta, all[startLen:]...)
 	}
 	return TurnResult{Done: done, StopReason: reason, Entries: delta, Usage: usage, Err: err}
+}
+
+// sessionThread converts session history into the minimal []Message the
+// KnowledgeGraph ingests, mirroring how Run accumulates its thread: user and
+// assistant messages by role+text, tool calls as "[tool: name]\n<input>"
+// (assistant), tool results as their output or "[error] <err>" (user).
+// Compaction/meta and non-user/assistant message entries are skipped — the
+// thread carries only conversation turns and tool exchanges.
+// On the runtime's per-turn serve path each call sees one turn's fresh session,
+// so a compaction summary's absence here is intentional, not a gap.
+func sessionThread(history []session.SessionEntry) []Message {
+	var thread []Message
+	for _, e := range history {
+		switch e.Type {
+		case session.EntryTypeMessage:
+			if e.Role != "user" && e.Role != "assistant" {
+				continue // skip system/summary messages
+			}
+			var d session.MessageData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			thread = append(thread, Message{Role: e.Role, Content: d.Text})
+		case session.EntryTypeToolCall:
+			var d session.ToolCallData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			thread = append(thread, Message{
+				Role:    "assistant",
+				Content: fmt.Sprintf("[tool: %s]\n%s", d.Tool, string(d.Input)),
+			})
+		case session.EntryTypeToolResult:
+			var d session.ToolResultData
+			if json.Unmarshal(e.Data, &d) != nil {
+				continue
+			}
+			content := d.Output
+			if d.Error != "" {
+				content = "[error] " + d.Error
+			}
+			thread = append(thread, Message{Role: "user", Content: content})
+		}
+	}
+	return thread
 }
