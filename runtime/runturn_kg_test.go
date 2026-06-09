@@ -163,3 +163,54 @@ func TestRunTurn_RecallTimeoutInjectsNothing(t *testing.T) {
 	require.Less(t, time.Since(start), 1500*time.Millisecond, "recall must be bounded ~800ms")
 	require.Len(t, captured, 1, "timed-out recall injects nothing")
 }
+
+func TestRunTurn_IngestOnCompletion(t *testing.T) {
+	llmProvider := &scriptedStreamLLM{events: []scriptedStreamEvent{
+		{typ: llm.EventTextDelta, text: "done"},
+		{typ: llm.EventDone},
+	}}
+	kg := &fakeKG{}
+	rt := &Runtime{
+		LLM: llmProvider, Tools: newEchoRegistry(), Session: session.NewSession("a", "k"),
+		AgentID: "a", Model: "test", StaticSystemPrompt: "S", KG: kg,
+	}
+	res, err := rt.RunTurn(context.Background(), "remember I like tea", nil, nil)
+	require.NoError(t, err)
+	require.True(t, res.Done)
+	require.Equal(t, 1, kg.ingestCalls, "ingest fires once on the completing round")
+	require.NotEmpty(t, kg.ingestThreads[0], "ingest gets a non-empty thread")
+	require.Equal(t, "user", kg.ingestThreads[0][0].Role)
+	require.Equal(t, "remember I like tea", kg.ingestThreads[0][0].Content)
+}
+
+func TestRunTurn_NoIngestOnToolRound(t *testing.T) {
+	tc := &llm.ToolCall{ID: "tc_1", Name: "echo", Input: json.RawMessage(`{"x":1}`)}
+	llmProvider := &scriptedStreamLLM{events: []scriptedStreamEvent{
+		{typ: llm.EventToolCallStart, toolCall: tc},
+		{typ: llm.EventToolCallDone, toolCall: tc},
+		{typ: llm.EventDone},
+	}}
+	kg := &fakeKG{}
+	rt := &Runtime{
+		LLM: llmProvider, Tools: newEchoRegistry(), Session: session.NewSession("a", "k"),
+		AgentID: "a", Model: "test", StaticSystemPrompt: "S", KG: kg,
+	}
+	res, err := rt.RunTurn(context.Background(), "use echo", nil, nil)
+	require.NoError(t, err)
+	require.False(t, res.Done, "tool round is not terminal")
+	require.Equal(t, 0, kg.ingestCalls, "no ingest on a round that produced tool calls")
+}
+
+func TestRunTurn_NoIngestWhenKGNil(t *testing.T) {
+	llmProvider := &scriptedStreamLLM{events: []scriptedStreamEvent{
+		{typ: llm.EventTextDelta, text: "done"},
+		{typ: llm.EventDone},
+	}}
+	rt := &Runtime{
+		LLM: llmProvider, Tools: newEchoRegistry(), Session: session.NewSession("a", "k"),
+		AgentID: "a", Model: "test", StaticSystemPrompt: "S", KG: nil,
+	}
+	res, err := rt.RunTurn(context.Background(), "hi", nil, nil)
+	require.NoError(t, err)
+	require.True(t, res.Done)
+}

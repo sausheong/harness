@@ -137,6 +137,13 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	}
 
 	if len(toolCalls) == 0 {
+		// Exchange complete: ingest the full thread once. Background + best-effort
+		// (the KG spawns its own bounded goroutine), so it never delays the turn.
+		// context.Background() because the request ctx may be cancelling and the
+		// ingest goroutine deliberately outlives the turn.
+		if r.KG != nil {
+			r.KG.Ingest(context.Background(), sessionThread(r.Session.View()))
+		}
 		emit(AgentEvent{Type: EventDone, Usage: lastUsage})
 		return r.turnSlice(startLen, true, "completed", lastUsage, nil), nil
 	}
