@@ -84,7 +84,7 @@ func TestContextWindowProxyProviderDetectedByModelFamily(t *testing.T) {
 		model string
 		want  int
 	}{
-		{"platformai/claude-sonnet-4-6-asia-southeast1", 200000},
+		{"platformai/claude-sonnet-4-6-asia-southeast1", 1000000},
 		{"openrouter/anthropic/claude-3-opus", 200000},
 		{"bedrock/anthropic.claude-3-haiku", 200000},
 		{"vertex/gemini-1.5-pro-001", 2000000},
@@ -134,4 +134,33 @@ func TestCalibratorIgnoresZeroOrNegative(t *testing.T) {
 	c.Update(100, 0)
 	c.Update(-5, 100)
 	assert.Equal(t, 100, c.Adjust(100), "bad samples must be ignored")
+}
+
+// TestContextWindow1MClaudeFamily pins the 1M-window Claude generation:
+// Fable 5, Mythos 5, Opus 4.6+, and Sonnet 4.6 all ship a 1M context
+// window. The old blanket claude→200k rule made compaction fire ~5x too
+// early on these models. Older Claude (3.x, 4.0-4.5 era) stays 200k.
+func TestContextWindow1MClaudeFamily(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{"anthropic/claude-fable-5", 1000000},
+		{"platformai/claude-fable-5-global", 1000000},
+		{"anthropic/claude-mythos-5", 1000000},
+		{"anthropic/claude-opus-4-6", 1000000},
+		{"anthropic/claude-opus-4-7", 1000000},
+		{"anthropic/claude-opus-4-8", 1000000},
+		{"platformai/claude-sonnet-4-6-asia-southeast1", 1000000},
+		// Older generations keep 200k.
+		{"anthropic/claude-haiku-4-5-20251001", 200000},
+		{"anthropic/claude-sonnet-4-5", 200000},
+		{"anthropic/claude-3-5-sonnet-20241022", 200000},
+		{"anthropic/claude-opus-4-0-20250514", 200000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			assert.Equal(t, tc.want, ContextWindow(tc.model))
+		})
+	}
 }
