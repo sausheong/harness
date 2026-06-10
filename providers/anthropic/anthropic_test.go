@@ -521,3 +521,109 @@ data: {"type":"message_stop"}
 	assert.Equal(t, `{}`, string(toolDone.ToolCall.Input),
 		"argument-less tool call must serialize as {} so MCP transport accepts it")
 }
+
+// --- Adaptive-thinking model mapping ---------------------------------
+//
+// Claude Fable 5, Claude Mythos 5, and Opus 4.7/4.8 reject the legacy
+// thinking config: `thinking: {type:"enabled", budget_tokens:N}` returns
+// HTTP 400 ("thinking.type.enabled is not supported for this model").
+// They also removed sampling params — sending `temperature` is a 400.
+// For these models the provider must emit `thinking: {type:"adaptive"}`
+// plus `output_config.effort`, and drop temperature.
+
+func wireJSON(t *testing.T, p *AnthropicProvider, req llm.ChatRequest) string {
+	t.Helper()
+	params := p.buildMessageParams(req)
+	b, err := json.Marshal(params)
+	require.NoError(t, err)
+	return string(b)
+}
+
+func TestAdaptiveThinkingModels_EmitAdaptiveNotEnabled(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	models := []string{
+		"claude-fable-5",
+		"claude-fable-5-global",   // LiteLLM / gateway model-group names
+		"claude-mythos-5",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"us.anthropic.claude-opus-4-8-v1", // Bedrock-style ID
+	}
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			got := wireJSON(t, p, llm.ChatRequest{
+				Model:     model,
+				Reasoning: llm.ReasoningHigh,
+				Messages:  []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			assert.Contains(t, got, `"thinking":{"type":"adaptive"}`,
+				"adaptive-only models must send thinking.type=adaptive")
+			assert.NotContains(t, got, `"budget_tokens"`,
+				"budget_tokens is rejected with 400 on adaptive-only models")
+			assert.Contains(t, got, `"output_config":{"effort":"high"}`,
+				"reasoning mode maps to output_config.effort on adaptive-only models")
+		})
+	}
+}
+
+func TestAdaptiveThinkingModels_EffortMapping(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	cases := []struct {
+		mode   llm.ReasoningMode
+		effort string
+	}{
+		{llm.ReasoningLow, "low"},
+		{llm.ReasoningMedium, "medium"},
+		{llm.ReasoningHigh, "high"},
+	}
+	for _, c := range cases {
+		t.Run(string(c.mode), func(t *testing.T) {
+			got := wireJSON(t, p, llm.ChatRequest{
+				Model:     "claude-opus-4-8",
+				Reasoning: c.mode,
+				Messages:  []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			assert.Contains(t, got, `"output_config":{"effort":"`+c.effort+`"}`)
+		})
+	}
+}
+
+func TestAdaptiveThinkingModels_ReasoningOffOmitsThinking(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	got := wireJSON(t, p, llm.ChatRequest{
+		Model:    "claude-fable-5",
+		Messages: []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	assert.NotContains(t, got, `"thinking"`,
+		"reasoning off must omit the thinking param entirely — Fable 5 "+
+			"rejects an explicit {type:disabled} with 400")
+	assert.NotContains(t, got, `"output_config"`)
+}
+
+func TestAdaptiveThinkingModels_TemperatureDropped(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	for _, model := range []string{"claude-fable-5", "claude-opus-4-7", "claude-opus-4-8"} {
+		t.Run(model, func(t *testing.T) {
+			got := wireJSON(t, p, llm.ChatRequest{
+				Model:       model,
+				Temperature: 0.7,
+				Reasoning:   llm.ReasoningMedium,
+				Messages:    []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			assert.NotContains(t, got, `"temperature"`,
+				"sampling params are removed on these models — sending temperature is a 400")
+		})
+	}
+}
+
+func TestLegacyThinkingModels_KeepBudgetTokens(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	got := wireJSON(t, p, llm.ChatRequest{
+		Model:     "claude-sonnet-4-5",
+		Reasoning: llm.ReasoningHigh,
+		Messages:  []llm.Message{{Role: "user", Content: "hi"}},
+	})
+	assert.Contains(t, got, `"budget_tokens":16384`,
+		"pre-4.7 models keep the enabled+budget_tokens config")
+	assert.NotContains(t, got, `"output_config"`)
+}
