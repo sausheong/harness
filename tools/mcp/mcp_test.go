@@ -150,6 +150,29 @@ func TestMCPClient_ConnectDiscovers(t *testing.T) {
 	assert.ElementsMatch(t, []string{"mcp__srv__a", "mcp__srv__b"}, got)
 }
 
+func TestMCPClient_PingLiveAndDead(t *testing.T) {
+	// Built inline (not via startInProcessServer) because the test needs the
+	// server session to kill the connection mid-life.
+	ctx := context.Background()
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "v0"}, nil)
+	tf := stringArgTool("noop", "no-op", func(_ context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: ""}}}, nil
+	})
+	server.AddTool(tf.Tool, tf.Handler)
+	clientTransport, serverTransport := sdk.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	require.NoError(t, err)
+
+	cli, err := connectWithTransport(ctx, "srv", clientTransport, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+
+	require.NoError(t, cli.Ping(ctx), "ping against a live session must succeed")
+
+	require.NoError(t, serverSession.Close())
+	assert.Error(t, cli.Ping(ctx), "ping after the server side died must fail")
+}
+
 func TestMCPClient_CloseIsIdempotent(t *testing.T) {
 	cli := startInProcessServer(t, "srv", []sdkToolFixture{
 		stringArgTool("noop", "no-op", func(_ context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
