@@ -87,10 +87,28 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 	if sys := buildAnthropicSystem(req); len(sys) > 0 {
 		params.System = sys
 	}
-	if req.Temperature > 0 {
+	if req.Temperature > 0 && !anthropicAdaptiveThinkingOnly(model) {
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
-	if cfg, ok := p.BuildThinkingConfig(model, req.Reasoning); ok {
+	if anthropicAdaptiveThinkingOnly(model) {
+		// Fable 5 / Mythos 5 / Opus 4.7+ reject the legacy
+		// enabled+budget_tokens config (400 "thinking.type.enabled is
+		// not supported"). They take {type:"adaptive"} plus
+		// output_config.effort; sampling params are also removed.
+		// Reasoning off → omit thinking entirely (Fable 5 rejects an
+		// explicit {type:"disabled"} too).
+		if req.Reasoning != llm.ReasoningOff {
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+			}
+			params.OutputConfig = anthropic.OutputConfigParam{
+				Effort: anthropicEffort(req.Reasoning),
+			}
+			slog.Info("anthropic adaptive thinking",
+				"model", model,
+				"effort", string(anthropicEffort(req.Reasoning)))
+		}
+	} else if cfg, ok := p.BuildThinkingConfig(model, req.Reasoning); ok {
 		required := cfg.BudgetTokens + 4096
 		if maxTokens < required {
 			maxTokens = required
@@ -371,6 +389,42 @@ func (p *AnthropicProvider) BuildThinkingConfig(model string, mode llm.Reasoning
 		return &AnthropicThinkingConfig{BudgetTokens: 16384}, true
 	default:
 		return nil, false
+	}
+}
+
+// anthropicAdaptiveThinkingOnly reports whether the model accepts ONLY
+// adaptive thinking: Claude Fable 5, Claude Mythos 5, and Opus 4.7+.
+// On these the legacy {type:"enabled", budget_tokens:N} config and
+// sampling params (temperature/top_p/top_k) return HTTP 400. Matched by
+// substring so gateway model-group names (claude-fable-5-global) and
+// Bedrock-style IDs (us.anthropic.claude-opus-4-8-v1) are covered.
+func anthropicAdaptiveThinkingOnly(model string) bool {
+	adaptiveOnly := []string{
+		"claude-fable-5",
+		"claude-mythos-5",
+		"claude-mythos-preview",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"claude-opus-4-9", // future-proof within the 4.x line
+	}
+	for _, marker := range adaptiveOnly {
+		if strings.Contains(model, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicEffort maps the unified ReasoningMode onto output_config.effort
+// for adaptive-thinking-only models.
+func anthropicEffort(mode llm.ReasoningMode) anthropic.OutputConfigEffort {
+	switch mode {
+	case llm.ReasoningLow:
+		return anthropic.OutputConfigEffortLow
+	case llm.ReasoningMedium:
+		return anthropic.OutputConfigEffortMedium
+	default:
+		return anthropic.OutputConfigEffortHigh
 	}
 }
 
