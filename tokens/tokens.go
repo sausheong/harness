@@ -110,8 +110,20 @@ func windowByModelFamily(modelID string) int {
 		leaf = leaf[i+1:]
 	}
 	switch {
+	case strings.Contains(id, "claude-fable"),
+		strings.Contains(id, "claude-mythos"),
+		strings.Contains(id, "claude-opus-4-6"),
+		strings.Contains(id, "claude-opus-4-7"),
+		strings.Contains(id, "claude-opus-4-8"),
+		strings.Contains(id, "claude-opus-4-9"),
+		strings.Contains(id, "claude-sonnet-4-6"):
+		// The 1M-window Claude generation: Fable 5, Mythos 5,
+		// Opus 4.6+, Sonnet 4.6. Matching the 200k blanket rule below
+		// would make preventive compaction fire ~5x too early.
+		return 1000000
 	case strings.Contains(id, "claude"):
-		// All current Claude chat models share a 200k window.
+		// Older Claude chat models (3.x through the 4.5 era, Haiku 4.5)
+		// share a 200k window.
 		return 200000
 	case strings.HasPrefix(leaf, "gpt-4o"), strings.HasPrefix(leaf, "gpt-4-turbo"):
 		return 128000
