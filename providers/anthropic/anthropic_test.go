@@ -627,3 +627,84 @@ func TestLegacyThinkingModels_KeepBudgetTokens(t *testing.T) {
 		"pre-4.7 models keep the enabled+budget_tokens config")
 	assert.NotContains(t, got, `"output_config"`)
 }
+
+// TestAnthropicStream_RefusalStopReasonSurfaced reproduces the Claude
+// Fable 5 classifier refusal: HTTP 200, a message_delta carrying
+// stop_reason=refusal + stop_details.category, and NO content blocks.
+// The parser previously dropped stop_reason entirely, so the runtime
+// saw an empty-but-successful turn and the user saw a silent nothing.
+func TestAnthropicStream_RefusalStopReasonSurfaced(t *testing.T) {
+	const sseBody = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_r","type":"message","role":"assistant","content":[],"model":"claude-fable-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":29,"output_tokens":0}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"bio","explanation":null}},"usage":{"output_tokens":4}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewAnthropicProvider("test-key", srv.URL)
+	stream, err := p.ChatStream(context.Background(), llm.ChatRequest{Model: "claude-fable-5"})
+	require.NoError(t, err)
+
+	var done *llm.ChatEvent
+	for ev := range stream {
+		if ev.Type == llm.EventDone {
+			ev := ev
+			done = &ev
+		}
+	}
+	require.NotNil(t, done, "stream must emit EventDone")
+	assert.Equal(t, "refusal", done.StopReason)
+	assert.Equal(t, "bio", done.StopCategory)
+}
+
+// Normal end_turn streams must carry the stop reason too (and no category).
+func TestAnthropicStream_EndTurnStopReason(t *testing.T) {
+	const sseBody = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_n","type":"message","role":"assistant","content":[],"model":"claude-fable-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewAnthropicProvider("test-key", srv.URL)
+	stream, err := p.ChatStream(context.Background(), llm.ChatRequest{Model: "claude-fable-5"})
+	require.NoError(t, err)
+
+	var done *llm.ChatEvent
+	for ev := range stream {
+		if ev.Type == llm.EventDone {
+			ev := ev
+			done = &ev
+		}
+	}
+	require.NotNil(t, done)
+	assert.Equal(t, "end_turn", done.StopReason)
+	assert.Empty(t, done.StopCategory)
+}

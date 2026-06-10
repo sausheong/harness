@@ -266,3 +266,110 @@ func TestBuildRuntimeRejectsCrossProviderFallback(t *testing.T) {
 func decodeMessage(e session.SessionEntry, dst *session.MessageData) error {
 	return json.Unmarshal(e.Data, dst)
 }
+
+// refusalThenSuccessProvider returns a classifier-refusal stream (HTTP
+// 200, EventDone with StopReason=refusal, no content) on the first call
+// and a normal text stream on the second. Mirrors Claude Fable 5 safety
+// classifier behavior: refusals are NOT transport errors, so the
+// existing IsRetryableModelError path never sees them.
+type refusalThenSuccessProvider struct {
+	llmtest.Base
+	calls      int
+	modelsSeen []string
+	finalText  string
+}
+
+func (p *refusalThenSuccessProvider) ChatStream(_ context.Context, req llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.calls++
+	p.modelsSeen = append(p.modelsSeen, req.Model)
+	ch := make(chan llm.ChatEvent, 4)
+	if p.calls == 1 {
+		ch <- llm.ChatEvent{Type: llm.EventDone, StopReason: llm.StopReasonRefusal, StopCategory: "bio"}
+	} else {
+		ch <- llm.ChatEvent{Type: llm.EventTextDelta, Text: p.finalText}
+		ch <- llm.ChatEvent{Type: llm.EventDone, StopReason: "end_turn"}
+	}
+	close(ch)
+	return ch, nil
+}
+
+// TestRuntimeRefusalRetriesOnFallbackModel: a refusal turn with a
+// configured fallback must transparently re-run the turn on the
+// fallback model instead of surfacing an empty response.
+func TestRuntimeRefusalRetriesOnFallbackModel(t *testing.T) {
+	prov := &refusalThenSuccessProvider{finalText: "fallback answered"}
+	rt := &Runtime{
+		LLM:           prov,
+		Tools:         tool.NewRegistry(),
+		Session:       session.NewSession("a", "k"),
+		AgentID:       "a",
+		Model:         "claude-fable-5",
+		FallbackModel: "claude-opus-4-8",
+		Provider:      "anthropic",
+		MaxTurns:      3,
+		Workspace:     t.TempDir(),
+	}
+	out, err := rt.RunSync(context.Background(), "summarise the biology article", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "fallback answered", out)
+	require.Equal(t, 2, prov.calls, "refusal + fallback retry = 2 calls")
+	assert.Equal(t, "claude-fable-5", prov.modelsSeen[0])
+	assert.Equal(t, "claude-opus-4-8", prov.modelsSeen[1])
+}
+
+// alwaysRefusalProvider refuses every call — covers the no-fallback and
+// fallback-also-refused paths.
+type alwaysRefusalProvider struct {
+	llmtest.Base
+	calls int
+}
+
+func (p *alwaysRefusalProvider) ChatStream(_ context.Context, _ llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.calls++
+	ch := make(chan llm.ChatEvent, 2)
+	ch <- llm.ChatEvent{Type: llm.EventDone, StopReason: llm.StopReasonRefusal, StopCategory: "cyber"}
+	close(ch)
+	return ch, nil
+}
+
+// TestRuntimeRefusalWithoutFallbackSurfacesVisibleText: with no fallback
+// the user must see an explanation, not an empty response.
+func TestRuntimeRefusalWithoutFallbackSurfacesVisibleText(t *testing.T) {
+	prov := &alwaysRefusalProvider{}
+	rt := &Runtime{
+		LLM:       prov,
+		Tools:     tool.NewRegistry(),
+		Session:   session.NewSession("a", "k"),
+		AgentID:   "a",
+		Model:     "claude-fable-5",
+		Provider:  "anthropic",
+		MaxTurns:  3,
+		Workspace: t.TempDir(),
+	}
+	out, err := rt.RunSync(context.Background(), "do something", nil)
+	require.NoError(t, err, "a refusal is a model decision, not a transport error")
+	assert.Contains(t, out, "declined", "refusal must produce visible explanation text")
+	assert.Contains(t, out, "cyber", "category should be included when present")
+	assert.Equal(t, 1, prov.calls, "no fallback configured → no retry")
+}
+
+// TestRuntimeRefusalFallbackAlsoRefusesSurfacesText: when the fallback
+// refuses too, stop (no infinite retry) and surface the explanation.
+func TestRuntimeRefusalFallbackAlsoRefusesSurfacesText(t *testing.T) {
+	prov := &alwaysRefusalProvider{}
+	rt := &Runtime{
+		LLM:           prov,
+		Tools:         tool.NewRegistry(),
+		Session:       session.NewSession("a", "k"),
+		AgentID:       "a",
+		Model:         "claude-fable-5",
+		FallbackModel: "claude-opus-4-8",
+		Provider:      "anthropic",
+		MaxTurns:      3,
+		Workspace:     t.TempDir(),
+	}
+	out, err := rt.RunSync(context.Background(), "do something", nil)
+	require.NoError(t, err)
+	assert.Contains(t, out, "declined")
+	assert.Equal(t, 2, prov.calls, "primary + one fallback attempt, then stop")
+}

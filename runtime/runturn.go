@@ -113,25 +113,61 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	var textContent strings.Builder
 	var toolCalls []llm.ToolCall
 	var lastUsage *llm.Usage
-	for event := range stream {
-		switch event.Type {
-		case llm.EventTextDelta:
-			textContent.WriteString(event.Text)
-			emit(AgentEvent{Type: EventTextDelta, Text: event.Text})
-		case llm.EventToolCallStart:
-			emit(AgentEvent{Type: EventToolCallStart, ToolCall: event.ToolCall})
-		case llm.EventToolCallDone:
-			if event.ToolCall != nil {
-				toolCalls = append(toolCalls, *event.ToolCall)
+	retriedRefusal := false
+streamLoop:
+	for {
+		var refused bool
+		var refusalCategory string
+		for event := range stream {
+			switch event.Type {
+			case llm.EventTextDelta:
+				textContent.WriteString(event.Text)
+				emit(AgentEvent{Type: EventTextDelta, Text: event.Text})
+			case llm.EventToolCallStart:
+				emit(AgentEvent{Type: EventToolCallStart, ToolCall: event.ToolCall})
+			case llm.EventToolCallDone:
+				if event.ToolCall != nil {
+					toolCalls = append(toolCalls, *event.ToolCall)
+				}
+			case llm.EventDone:
+				refused = event.StopReason == llm.StopReasonRefusal
+				refusalCategory = event.StopCategory
+				if event.Usage != nil {
+					lastUsage = event.Usage
+				}
+			case llm.EventError:
+				emit(AgentEvent{Type: EventError, Error: event.Error})
+				return r.turnSlice(startLen, true, "error", lastUsage, event.Error), nil
 			}
-		case llm.EventDone:
-			if event.Usage != nil {
-				lastUsage = event.Usage
-			}
-		case llm.EventError:
-			emit(AgentEvent{Type: EventError, Error: event.Error})
-			return r.turnSlice(startLen, true, "error", lastUsage, event.Error), nil
 		}
+
+		// Same refusal contract as Run: retry once on the fallback model,
+		// else surface a visible explanation instead of empty silence.
+		if refused {
+			if !retriedRefusal && r.FallbackModel != "" && r.FallbackModel != req.Model {
+				retriedRefusal = true
+				textContent.Reset()
+				toolCalls = nil
+				req.Model = r.FallbackModel
+				retryStream, retryErr := r.LLM.ChatStream(ctx, req)
+				if retryErr != nil {
+					emit(AgentEvent{Type: EventError, Error: retryErr})
+					return r.turnSlice(startLen, true, "error", lastUsage, retryErr), nil
+				}
+				stream = retryStream
+				continue streamLoop
+			}
+			textContent.Reset()
+			toolCalls = nil
+			note := "The model declined this request (safety classifier"
+			if refusalCategory != "" {
+				note += ", category: " + refusalCategory
+			}
+			note += "). Try rephrasing, or switch this agent to a model without these classifiers."
+			textContent.WriteString(note)
+			emit(AgentEvent{Type: EventTextDelta, Text: note})
+		}
+		break streamLoop
 	}
 
 	if textContent.Len() > 0 {
