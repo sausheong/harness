@@ -125,6 +125,13 @@ func (c *Client) Tools() []tool.Tool { return c.tools }
 // Name returns the configured server name.
 func (c *Client) Name() string { return c.name }
 
+// Ping verifies the session is alive by sending an MCP ping. A non-nil
+// error means the session (and for stdio servers, likely the child
+// process) is no longer usable.
+func (c *Client) Ping(ctx context.Context) error {
+	return c.session.Ping(ctx, nil)
+}
+
 // Close releases the underlying MCP session. Safe to call multiple
 // times — subsequent calls are no-ops.
 func (c *Client) Close() error {

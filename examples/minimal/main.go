@@ -82,6 +82,8 @@ func main() {
 	}
 	defer rt.Close() // no-op here (no MCP), but idiomatic
 
+	_ = llm.ReasoningOff // keep llm import live for clarity in the demo
+
 	// 5. REPL loop.
 	in := bufio.NewScanner(os.Stdin)
 	fmt.Println("harness demo — type a message, blank line to exit")
@@ -115,5 +117,4 @@ func main() {
 			}
 		}
 	}
-	_ = llm.ReasoningOff // keep llm import live for clarity in the demo
 }
