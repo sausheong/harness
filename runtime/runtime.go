@@ -485,6 +485,9 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 
 			streamSource := stream
 			retriedNonStreaming := false
+			retriedRefusal := false
+			var refused bool
+			var refusalCategory string
 		streamLoop:
 			for {
 				for event := range streamSource {
@@ -527,6 +530,8 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						}()
 
 					case llm.EventDone:
+						refused = event.StopReason == llm.StopReasonRefusal
+						refusalCategory = event.StopCategory
 						if event.Usage != nil {
 							lastUsage = event.Usage
 						}
@@ -566,6 +571,53 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventError, Error: event.Error})
 						return
 					}
+				}
+
+				// Classifier/model refusal (Claude Fable 5+): HTTP 200,
+				// stop_reason=refusal, usually no content. Without handling,
+				// the turn ends as a silent empty success. Retry once on the
+				// fallback model (refusals are model-specific — Opus-tier
+				// has no bio/cyber classifiers); otherwise synthesize a
+				// visible explanation. Mid-stream refusals discard partial
+				// output per the API contract.
+				if refused {
+					if !retriedRefusal && r.FallbackModel != "" && r.FallbackModel != req.Model {
+						slog.Warn("model refused; retrying on fallback model",
+							"agent", r.AgentID,
+							"primary", req.Model,
+							"fallback", r.FallbackModel,
+							"category", refusalCategory)
+						tr.Mark("llm.refusal_fallback", "turn", turn,
+							"primary", req.Model, "fallback", r.FallbackModel,
+							"category", refusalCategory)
+						textContent.Reset()
+						toolCalls = nil
+						drainKickoffs(kickoffs)
+						kickoffs = map[string]chan kickoffResult{}
+						gotFirstToken = false
+						kickoffStopped = false
+						refused = false
+						retriedRefusal = true
+						req.Model = r.FallbackModel
+						retryStream, retryErr := r.LLM.ChatStream(ctx, req)
+						if retryErr != nil {
+							stopReason = "error"
+							r.emit(AgentEvent{Type: EventError, Error: retryErr})
+							return
+						}
+						streamSource = retryStream
+						continue streamLoop
+					}
+					textContent.Reset()
+					toolCalls = nil
+					drainKickoffs(kickoffs)
+					note := "The model declined this request (safety classifier"
+					if refusalCategory != "" {
+						note += ", category: " + refusalCategory
+					}
+					note += "). Try rephrasing, or switch this agent to a model without these classifiers."
+					textContent.WriteString(note)
+					r.emit(AgentEvent{Type: EventTextDelta, Text: note})
 				}
 				break streamLoop
 			}

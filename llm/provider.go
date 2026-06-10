@@ -135,7 +135,22 @@ type ChatEvent struct {
 	ToolCall *ToolCall
 	Usage    *Usage
 	Error    error
+	// StopReason carries the provider's terminal stop reason on EventDone
+	// ("end_turn", "tool_use", "max_tokens", "refusal", ...). Empty when
+	// the provider doesn't report one. StopReasonRefusal is the value the
+	// runtime branches on: Claude Fable 5 safety classifiers decline a
+	// request with HTTP 200 + stop_reason=refusal and empty content —
+	// without surfacing it the turn looks like a silent empty success.
+	StopReason string
+	// StopCategory is the refusal policy category from stop_details
+	// ("cyber", "bio", "reasoning_extraction"); informational only and
+	// may be empty even on a refusal.
+	StopCategory string
 }
+
+// StopReasonRefusal is the StopReason value for safety-classifier and
+// model-initiated refusals (Claude Fable 5+).
+const StopReasonRefusal = "refusal"
 
 // ModelInfo describes an available model.
 type ModelInfo struct {

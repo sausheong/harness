@@ -245,7 +245,14 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 				currentBlockType = ""
 
 			case "message_delta":
-				if event.Usage.OutputTokens > 0 || cacheCreationTokens > 0 || cacheReadTokens > 0 {
+				stopReason := string(event.Delta.StopReason)
+				stopCategory := string(event.Delta.StopDetails.Category)
+				if stopReason == llm.StopReasonRefusal {
+					slog.Warn("anthropic refusal stop reason",
+						"category", stopCategory,
+						"output_tokens", event.Usage.OutputTokens)
+				}
+				if event.Usage.OutputTokens > 0 || cacheCreationTokens > 0 || cacheReadTokens > 0 || stopReason != "" {
 					slog.Info("anthropic stream usage",
 						"input_tokens", inputTokens,
 						"output_tokens", event.Usage.OutputTokens,
@@ -260,6 +267,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 							CacheCreationInputTokens: int(cacheCreationTokens),
 							CacheReadInputTokens:     int(cacheReadTokens),
 						},
+						StopReason:   stopReason,
+						StopCategory: stopCategory,
 					}
 				}
 
@@ -344,6 +353,8 @@ func (p *AnthropicProvider) ChatNonStreaming(ctx context.Context, req llm.ChatRe
 				CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
 				CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
 			},
+			StopReason:   string(msg.StopReason),
+			StopCategory: string(msg.StopDetails.Category),
 		}
 	}()
 	return events, nil
