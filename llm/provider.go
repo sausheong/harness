@@ -186,6 +186,18 @@ type NonStreamingProvider interface {
 	ChatNonStreaming(ctx context.Context, req ChatRequest) (<-chan ChatEvent, error)
 }
 
+// PromptCachingProvider is an optional capability interface: providers
+// that implement Anthropic-style explicit prompt caching (cache_control
+// breakpoints, CacheLastMessage) declare it here. The runtime gates
+// caching on this capability rather than on the provider's configured
+// NAME — a user-named provider block ("platformai", "bedrock", any
+// relay) wrapping an Anthropic-shaped API must still get caching;
+// matching the name string alone silently disabled it for every
+// renamed provider.
+type PromptCachingProvider interface {
+	SupportsPromptCaching() bool
+}
+
 // ParseProviderModel splits "provider/model" into (provider, model).
 // If no slash is present, returns ("", name) and the caller should use a default.
 func ParseProviderModel(name string) (provider, model string) {

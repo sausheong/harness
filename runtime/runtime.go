@@ -181,14 +181,26 @@ func (r *Runtime) maybeKickoffAsyncCompaction(msgs []llm.Message, parts []llm.Sy
 }
 
 // providerSupportsCaching returns true when the runtime's provider implements
-// Anthropic-style explicit prompt caching.
+// Anthropic-style explicit prompt caching. The capability interface wins:
+// a provider block named "platformai" (or "bedrock", or anything else)
+// wrapping the Anthropic implementation still caches. The name check is
+// the legacy fallback for custom LLMProvider impls that predate the
+// capability interface.
 func (r *Runtime) providerSupportsCaching() bool {
+	if pc, ok := r.LLM.(llm.PromptCachingProvider); ok {
+		return pc.SupportsPromptCaching()
+	}
 	return r.Provider == "anthropic"
 }
 
 // providerSupportsMidLoopCompaction returns true for hosted frontier
-// providers that handle mid-loop summary injection cleanly.
+// providers that handle mid-loop summary injection cleanly. Same
+// capability-over-name rule as providerSupportsCaching: an
+// Anthropic-shaped provider under a custom name qualifies.
 func (r *Runtime) providerSupportsMidLoopCompaction() bool {
+	if pc, ok := r.LLM.(llm.PromptCachingProvider); ok && pc.SupportsPromptCaching() {
+		return true
+	}
 	switch r.Provider {
 	case "anthropic", "openai", "gemini":
 		return true

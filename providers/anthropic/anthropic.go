@@ -28,6 +28,11 @@ func NewAnthropicProvider(apiKey, baseURL string) *AnthropicProvider {
 	return &AnthropicProvider{client: client}
 }
 
+// SupportsPromptCaching implements llm.PromptCachingProvider: the
+// Anthropic Messages API honours cache_control breakpoints regardless
+// of what the provider block is named in user config.
+func (p *AnthropicProvider) SupportsPromptCaching() bool { return true }
+
 func (p *AnthropicProvider) Models() []llm.ModelInfo {
 	return []llm.ModelInfo{
 		{ID: "claude-sonnet-4-5-20250514", Name: "Claude Sonnet 4.5", Provider: "anthropic"},
