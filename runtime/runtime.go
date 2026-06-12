@@ -497,6 +497,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 
 			streamSource := stream
 			retriedNonStreaming := false
+			preTokenRetried := false
 			retriedRefusal := false
 			var refused bool
 			var refusalCategory string
@@ -556,6 +557,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						}
 
 					case llm.EventError:
+						if !gotFirstToken && !preTokenRetried {
+							if newStream, ok := r.recoverFromPreTokenError(ctx, event.Error, &req, &msgs, spillCfg); ok {
+								preTokenRetried = true
+								drainKickoffs(kickoffs)
+								kickoffs = map[string]chan kickoffResult{}
+								textContent.Reset()
+								toolCalls = nil
+								kickoffStopped = false
+								streamSource = newStream
+								continue streamLoop
+							}
+						}
 						if gotFirstToken && !retriedNonStreaming {
 							if ns, ok := r.LLM.(llm.NonStreamingProvider); ok {
 								slog.Warn("stream died mid-flight; retrying as non-streaming",
@@ -741,6 +754,42 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 	}()
 
 	return r.events, nil
+}
+
+// recoverFromPreTokenError attempts the same recovery the synchronous
+// ChatStream-error path performs, for an error delivered via EventError
+// before any token arrived (Anthropic/Gemini deliver HTTP errors this way).
+// Returns a fresh stream to resume from and true if recovered; false if the
+// error is not recoverable (caller should abort). May mutate *req (model
+// swap) and the session (compaction), and reassigns *msgs on compaction.
+func (r *Runtime) recoverFromPreTokenError(ctx context.Context, err error, req *llm.ChatRequest, msgs *[]llm.Message, spillCfg spillConfig) (<-chan llm.ChatEvent, bool) {
+	if compaction.IsContextOverflow(err) && r.Compaction != nil {
+		r.emit(AgentEvent{Type: EventCompactionStart})
+		res, _ := r.Compaction.MaybeCompact(ctx, r.Session, compaction.ReasonReactive, "")
+		if res.Compacted {
+			r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
+			history := r.Session.View()
+			newMsgs := assembleMessages(history)
+			pruneToolResults(newMsgs, r.maxToolResultLen(), spillCfg)
+			newMsgs = prependPostCompactRestore(newMsgs, r.snapshotTouchedFiles())
+			*msgs = newMsgs
+			req.Messages = newMsgs
+			if s, e := r.LLM.ChatStream(ctx, *req); e == nil {
+				return s, true
+			}
+		} else {
+			r.emit(AgentEvent{Type: EventCompactionSkipped, Compaction: &res})
+		}
+	}
+	if r.FallbackModel != "" && r.FallbackModel != req.Model && llm.IsRetryableModelError(err) {
+		slog.Info("llm fallback model engaged (stream error)",
+			"agent", r.AgentID, "primary", req.Model, "fallback", r.FallbackModel, "err", err.Error())
+		req.Model = r.FallbackModel
+		if s, e := r.LLM.ChatStream(ctx, *req); e == nil {
+			return s, true
+		}
+	}
+	return nil, false
 }
 
 // RunSync is a convenience method that runs the agent and collects the
