@@ -91,7 +91,11 @@ func (t *EditFileTool) Execute(_ context.Context, input json.RawMessage) (tool.T
 
 	newContent := strings.Replace(content, in.OldString, in.NewString, 1)
 
-	if err := os.WriteFile(in.Path, []byte(newContent), 0o644); err != nil {
+	mode := os.FileMode(0o600)
+	if info, statErr := os.Stat(in.Path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := tool.WriteFileAtomic(in.Path, []byte(newContent), mode); err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("failed to write file: %v", err)}, nil
 	}
 
