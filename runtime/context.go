@@ -11,6 +11,7 @@ import (
 
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
+	"github.com/sausheong/harness/tool"
 )
 
 // defaultMaxToolResultLen is the fallback cap used when LoopConfig.MaxToolResultLen
@@ -433,7 +434,7 @@ func spillToolResult(cfg spillConfig, toolCallID, content string) (string, error
 		return "", fmt.Errorf("spill mkdir: %w", err)
 	}
 	path := filepath.Join(dir, toolCallID+".txt")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := tool.WriteFileAtomic(path, []byte(content), 0o600); err != nil {
 		return "", fmt.Errorf("spill write: %w", err)
 	}
 	return path, nil
