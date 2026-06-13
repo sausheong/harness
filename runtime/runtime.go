@@ -448,20 +448,12 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				}
 			}
 
-			// turnEstimate is the raw (uncalibrated) token estimate for this
-			// turn's context. Computed here for preventive compaction and
-			// reused by the EventDone calibrator Update so we don't re-scan
-			// the whole context a second time per round. -1 = not computed
-			// this turn (e.g. compaction disabled); EventDone falls back to
-			// computing it itself in that case.
-			turnEstimate := -1
 			compactionAllowed := turn == 0 || r.providerSupportsMidLoopCompaction()
 			if compactionAllowed && r.Compaction != nil && r.Model != "" {
 				if r.calibrator == nil {
 					r.calibrator = tokens.NewCalibrator()
 				}
-				turnEstimate = tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs)
-				estimate := r.calibrator.Adjust(turnEstimate)
+				estimate := r.calibrator.Adjust(tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs))
 				window := tokens.ContextWindowFor(r.Model, r.ContextWindow)
 				threshold := 0.6
 				if r.Compaction != nil && r.Compaction.Threshold > 0 {
@@ -598,11 +590,13 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							lastUsage = event.Usage
 						}
 						if event.Usage != nil && r.calibrator != nil {
-							est := turnEstimate
-							if est < 0 {
-								est = tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs)
-							}
-							r.calibrator.Update(event.Usage.InputTokens, est)
+							// Recompute the estimate on the CURRENT msgs (which may
+							// have been reassembled by mid-turn compaction) so the
+							// calibration ratio matches event.Usage.InputTokens, as
+							// the pre-debounce code did. The P8 change only debounces
+							// the disk write (calibratorDirty + deferred flush), not
+							// the estimate computation.
+							r.calibrator.Update(event.Usage.InputTokens, tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs))
 							r.calibratorDirty = true
 						}
 
