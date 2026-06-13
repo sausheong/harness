@@ -21,6 +21,10 @@ func Estimate(msgs []llm.Message, systemPrompt string, tools []llm.ToolDef) int 
 		for _, tc := range m.ToolCalls {
 			total += len(tc.ID) + len(tc.Name) + len(tc.Input)
 		}
+		// Images are not part of Content (Images is json:"-"); approximate
+		// each attached image's token cost. perImageTokens is expressed in
+		// tokens, so multiply by 4 to survive the final divide-by-4.
+		total += len(m.Images) * perImageTokens * 4
 	}
 	for _, t := range tools {
 		total += len(t.Name) + len(t.Description) + len(t.Parameters)
@@ -32,6 +36,12 @@ func Estimate(msgs []llm.Message, systemPrompt string, tools []llm.ToolDef) int 
 // every chat-style provider (role tags, separators). Expressed in characters
 // since the final divide-by-4 maps it back to tokens.
 const perMessageOverhead = 3
+
+// perImageTokens approximates the token cost of one attached image. Vision
+// models bill images by tiles/resolution; ~1500 tokens is a deliberately
+// conservative flat estimate so image-heavy sessions trigger preventive
+// compaction rather than hitting a reactive overflow.
+const perImageTokens = 1500
 
 // ContextWindow returns the maximum input tokens for the given
 // "provider/model" identifier.

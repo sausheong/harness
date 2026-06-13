@@ -6,6 +6,7 @@ import (
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	openai "github.com/sashabaranov/go-openai"
+	"google.golang.org/genai"
 )
 
 // IsRetryableModelError reports whether err is a transient capacity
@@ -14,14 +15,17 @@ import (
 //
 //   - Anthropic 429 (rate limit) and 529 (overloaded)
 //   - OpenAI 429 (rate limit) and 5xx (server / overloaded)
+//   - Gemini 429 (quota/RESOURCE_EXHAUSTED) and 5xx (overloaded/unavailable),
+//     recognized via a typed genai.APIError path (Gemini's error string
+//     "Error 429, ... Status: RESOURCE_EXHAUSTED" does not match the
+//     bounded substring forms, so the typed path is required).
 //
 // Anything else (including 4xx auth/validation errors) returns false:
 // retrying with a different model wouldn't fix the underlying problem.
 //
-// Errors from local providers (Ollama, etc.) and Gemini are NOT
-// classified as retryable here; their failure modes are different
-// and a model swap rarely helps. Add cases as new providers
-// accumulate retry experience.
+// Errors from local providers (Ollama, etc.) are NOT classified as
+// retryable here; their failure modes are different and a model swap
+// rarely helps. Add cases as new providers accumulate retry experience.
 func IsRetryableModelError(err error) bool {
 	if err == nil {
 		return false
@@ -47,13 +51,29 @@ func IsRetryableModelError(err error) bool {
 		return openaiReqErr.HTTPStatusCode == 429 ||
 			(openaiReqErr.HTTPStatusCode >= 500 && openaiReqErr.HTTPStatusCode < 600)
 	}
+	// genai.APIError.Error() is a value receiver, so the error interface is
+	// satisfied by the value; errors.As targets the value type.
+	var genaiErr genai.APIError
+	if errors.As(err, &genaiErr) {
+		return genaiErr.Code == 429 ||
+			(genaiErr.Code >= 500 && genaiErr.Code < 600)
+	}
 
 	// Last-ditch: substring match on common SDK error wrappers that
 	// don't unwrap cleanly to typed errors. Cheap belt-and-braces;
 	// only reached when no typed match found above.
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "429") || strings.Contains(msg, "529") ||
-		strings.Contains(msg, "rate limit") || strings.Contains(msg, "overloaded") {
+	// Bounded forms so a bare "429"/"529" inside a request id or unrelated
+	// digits doesn't trigger a retry. Word matches stay as-is (specific).
+	for _, sig := range []string{
+		"status 429", "code: 429", "code:429", " 429 ", "429 too many requests",
+		"status 529", "code: 529", "code:529", " 529 ", "529 overloaded",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "overloaded") {
 		return true
 	}
 	return false
