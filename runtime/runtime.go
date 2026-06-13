@@ -114,6 +114,12 @@ type Runtime struct {
 
 	calibrator *tokens.Calibrator
 
+	// calibratorDirty records that the calibrator was updated during this
+	// Run and must be flushed to CalibratorStore once at Run end. Accessed
+	// only on the Run goroutine (EventDone handling + deferred flush), so no
+	// lock is needed.
+	calibratorDirty bool
+
 	// mcpClients holds the MCP client sessions resolved from
 	// AgentSpec.MCPServers. Released by Close. Untouched when MCP is
 	// not used.
@@ -253,6 +259,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 	go func() {
 		defer close(r.events)
 		defer tr.Summary()
+
+		// Flush the per-session calibrator once at Run end (all exit paths:
+		// normal, error, abort) instead of writing to disk on every LLM
+		// round. EventDone sets calibratorDirty when it folds in a usage
+		// sample; this defer persists the final state. Registered here so it
+		// runs regardless of which return below fires.
+		defer func() {
+			if r.calibratorDirty && r.CalibratorStore != nil && r.Session != nil && r.calibrator != nil {
+				ratio, count := r.calibrator.Snapshot()
+				r.CalibratorStore.Save(r.AgentID, r.Session.Key, ratio, count)
+			}
+		}()
 
 		// stopReason is read by the OnStop deferred hook below. Each early
 		// return path reassigns it before returning. Default is "max_turns"
@@ -410,12 +428,20 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				}
 			}
 
+			// turnEstimate is the raw (uncalibrated) token estimate for this
+			// turn's context. Computed here for preventive compaction and
+			// reused by the EventDone calibrator Update so we don't re-scan
+			// the whole context a second time per round. -1 = not computed
+			// this turn (e.g. compaction disabled); EventDone falls back to
+			// computing it itself in that case.
+			turnEstimate := -1
 			compactionAllowed := turn == 0 || r.providerSupportsMidLoopCompaction()
 			if compactionAllowed && r.Compaction != nil && r.Model != "" {
 				if r.calibrator == nil {
 					r.calibrator = tokens.NewCalibrator()
 				}
-				estimate := r.calibrator.Adjust(tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs))
+				turnEstimate = tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs)
+				estimate := r.calibrator.Adjust(turnEstimate)
 				window := tokens.ContextWindowFor(r.Model, r.ContextWindow)
 				threshold := 0.6
 				if r.Compaction != nil && r.Compaction.Threshold > 0 {
@@ -552,11 +578,12 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							lastUsage = event.Usage
 						}
 						if event.Usage != nil && r.calibrator != nil {
-							r.calibrator.Update(event.Usage.InputTokens, tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs))
-							if r.CalibratorStore != nil && r.Session != nil {
-								ratio, count := r.calibrator.Snapshot()
-								r.CalibratorStore.Save(r.AgentID, r.Session.Key, ratio, count)
+							est := turnEstimate
+							if est < 0 {
+								est = tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs)
 							}
+							r.calibrator.Update(event.Usage.InputTokens, est)
+							r.calibratorDirty = true
 						}
 
 					case llm.EventError:
