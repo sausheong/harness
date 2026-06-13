@@ -52,7 +52,7 @@ func (t *EditFileTool) Parameters() json.RawMessage {
 // IsConcurrencySafe returns false — edit_file mutates the filesystem.
 func (t *EditFileTool) IsConcurrencySafe(_ json.RawMessage) bool { return false }
 
-func (t *EditFileTool) Execute(_ context.Context, input json.RawMessage) (tool.ToolResult, error) {
+func (t *EditFileTool) Execute(ctx context.Context, input json.RawMessage) (tool.ToolResult, error) {
 	var in editFileInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("invalid input: %v", err)}, nil
@@ -72,6 +72,10 @@ func (t *EditFileTool) Execute(_ context.Context, input json.RawMessage) (tool.T
 		if err := tool.ValidatePathInWorkDir(in.Path, t.WorkDir); err != nil {
 			return tool.ToolResult{Error: err.Error()}, nil
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return tool.ToolResult{Error: err.Error()}, nil
 	}
 
 	if msg := checkFileSize(in.Path, int64(maxTextFileSize), "text"); msg != "" {

@@ -58,3 +58,29 @@ func TestEditFile_RejectsOversized(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, res.Error, "too large")
 }
+
+func TestReadFile_HonorsCancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	require.NoError(t, os.WriteFile(p, []byte("hello"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tool := &ReadFileTool{}
+	in, _ := json.Marshal(map[string]string{"path": p})
+	res, err := tool.Execute(ctx, in)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Error, "cancelled ctx must short-circuit")
+}
+
+func TestEditFile_HonorsCancelledContext(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	require.NoError(t, os.WriteFile(p, []byte("hello"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tool := &EditFileTool{}
+	in, _ := json.Marshal(map[string]string{"path": p, "old_string": "h", "new_string": "H"})
+	res, err := tool.Execute(ctx, in)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Error, "cancelled ctx must short-circuit")
+}
