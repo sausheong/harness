@@ -204,10 +204,11 @@ func (p *QwenProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-c
 	}
 
 	openaiReq := openai.ChatCompletionRequest{
-		Model:     model,
-		Messages:  msgs,
-		MaxTokens: maxTokens,
-		Stream:    true,
+		Model:               model,
+		Messages:            msgs,
+		MaxCompletionTokens: maxTokens,
+		Stream:              true,
+		StreamOptions:       &openai.StreamOptions{IncludeUsage: true},
 	}
 
 	if len(tools) > 0 {
