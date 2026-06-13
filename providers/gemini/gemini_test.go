@@ -24,3 +24,12 @@ func TestGeminiResolveSystemPromptEmpty(t *testing.T) {
 	got := geminiResolveSystemPrompt(llm.ChatRequest{})
 	require.Equal(t, "", got)
 }
+
+func TestGeminiUsageBuffer_KeepsLast(t *testing.T) {
+	var last *llm.Usage
+	last = updateUsage(last, 10, 5)
+	last = updateUsage(last, 20, 9) // final cumulative
+	require.NotNil(t, last)
+	require.Equal(t, 20, last.InputTokens)
+	require.Equal(t, 9, last.OutputTokens)
+}

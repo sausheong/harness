@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -707,4 +708,12 @@ data: {"type":"message_stop"}
 	require.NotNil(t, done)
 	assert.Equal(t, "end_turn", done.StopReason)
 	assert.Empty(t, done.StopCategory)
+}
+
+func TestAnthropicInputAccumulation(t *testing.T) {
+	var b strings.Builder
+	for _, part := range []string{`{"a"`, `:1`, `}`} {
+		b.WriteString(part)
+	}
+	require.Equal(t, `{"a":1}`, b.String())
 }

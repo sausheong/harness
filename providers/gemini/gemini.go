@@ -182,6 +182,8 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 	go func() {
 		defer close(events)
 
+		var lastUsage *llm.Usage
+
 		for resp, err := range p.client.Models.GenerateContentStream(ctx, model, contents, config) {
 			if err != nil {
 				events <- llm.ChatEvent{Type: llm.EventError, Error: err}
@@ -189,13 +191,9 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 			}
 
 			if resp.UsageMetadata != nil {
-				events <- llm.ChatEvent{
-					Type: llm.EventDone,
-					Usage: &llm.Usage{
-						InputTokens:  int(resp.UsageMetadata.PromptTokenCount),
-						OutputTokens: int(resp.UsageMetadata.CandidatesTokenCount),
-					},
-				}
+				lastUsage = updateUsage(lastUsage,
+					int(resp.UsageMetadata.PromptTokenCount),
+					int(resp.UsageMetadata.CandidatesTokenCount))
 			}
 
 			for _, cand := range resp.Candidates {
@@ -240,10 +238,17 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 		}
 
 		// Ensure a Done event is always sent
-		events <- llm.ChatEvent{Type: llm.EventDone}
+		events <- llm.ChatEvent{Type: llm.EventDone, Usage: lastUsage}
 	}()
 
 	return events, nil
+}
+
+// updateUsage returns a *llm.Usage carrying the latest cumulative counts.
+// Gemini sends cumulative usage on multiple chunks; we keep only the last and
+// emit a single EventDone at stream end (mirrors the OpenAI provider's lastUsage).
+func updateUsage(_ *llm.Usage, prompt, candidates int) *llm.Usage {
+	return &llm.Usage{InputTokens: prompt, OutputTokens: candidates}
 }
 
 // geminiUnsupportedFields are JSON Schema fields Gemini's "OpenAPI 3.0
