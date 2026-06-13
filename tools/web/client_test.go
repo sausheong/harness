@@ -39,5 +39,16 @@ func TestSafeHTTPClient_RedirectToPrivateBlocked(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSafeHTTPClient_PublicUnreachableReturnsDialError(t *testing.T) {
+	// 192.0.2.1 is RFC5737 TEST-NET-1 (public, unrouteable). It is NOT in the
+	// private blocklist, so validation passes and we should get a DIAL error
+	// (timeout/unreachable), not a "blocked" validation error — proving the
+	// path dials rather than rejecting.
+	client := SafeHTTPClient(2 * time.Second)
+	_, err := client.Get("http://192.0.2.1/")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "internal address")
+}
+
 var _ = isPrivateIP(net.IPv4(127, 0, 0, 1))
 var _ = strings.TrimSpace

@@ -25,19 +25,29 @@ func SafeHTTPClient(timeout time.Duration) *http.Client {
 			if err != nil {
 				return nil, fmt.Errorf("cannot resolve %q — blocking to prevent SSRF", host)
 			}
-			var dialIP net.IP
+			// Fail closed: if ANY resolved IP is private, refuse — this defeats
+			// DNS-rebinding where one A record is public and another is private.
 			for _, ip := range ips {
 				if isPrivateIP(ip) {
 					return nil, fmt.Errorf("access to internal address %s (%s) is blocked", host, ip)
 				}
-				if dialIP == nil {
-					dialIP = ip
-				}
 			}
-			if dialIP == nil {
+			if len(ips) == 0 {
 				return nil, fmt.Errorf("no usable address for %q", host)
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(dialIP.String(), port))
+			// Try each validated public IP in order, falling back on dial
+			// failure so dual-stack hosts still connect on IPv4-only or
+			// IPv6-broken networks (stock happy-eyeballs is bypassed because we
+			// dial literal IPs to pin the validated address).
+			var lastErr error
+			for _, ip := range ips {
+				conn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if derr == nil {
+					return conn, nil
+				}
+				lastErr = derr
+			}
+			return nil, lastErr
 		},
 	}
 	return &http.Client{
