@@ -14,6 +14,11 @@ import (
 
 const searchTimeout = 15 * time.Second
 
+// searchClient is the shared SSRF-safe HTTP client for all web_search
+// backends. It pins the validated IP and re-validates redirects, bringing
+// web_search to parity with web_fetch. (N4)
+var searchClient = SafeHTTPClient(searchTimeout)
+
 // WebSearchTool searches the web and returns results via a configurable
 // backend. The default backend (when Backend is nil) scrapes DuckDuckGo's
 // HTML interface — no API key required, but fragile to upstream HTML
@@ -131,7 +136,7 @@ func duckDuckGoSearch(ctx context.Context, query string, maxResults int) ([]sear
 	}
 	req.Header.Set("User-Agent", "harness/1.0 (Go agent framework)")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := searchClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

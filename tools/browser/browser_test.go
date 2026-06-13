@@ -4,11 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHostResolverRules_BlocksPrivateRanges(t *testing.T) {
+	require.Contains(t, hostResolverRules, "127.0.0.0/8")
+	require.Contains(t, hostResolverRules, "169.254.0.0/16")
+	require.Contains(t, hostResolverRules, "10.0.0.0/8")
+	require.Contains(t, hostResolverRules, "192.168.0.0/16")
+	require.Contains(t, hostResolverRules, "172.16.0.0/12")
+	require.Contains(t, hostResolverRules, "localhost")
+	require.True(t, strings.Contains(hostResolverRules, "~NOTFOUND"))
+}
 
 func TestBrowserToolName(t *testing.T) {
 	tool := &BrowserTool{}

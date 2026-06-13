@@ -1,10 +1,12 @@
 package web
 
 import (
+	"net"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateURLNotInternal_BlocksLoopback(t *testing.T) {
@@ -44,4 +46,29 @@ func TestValidateURLNotInternal_RejectsBadScheme(t *testing.T) {
 	err := ValidateURLNotInternal("file:///etc/passwd")
 	assert.Error(t, err, "non-http schemes must be rejected")
 	_ = strings.TrimSpace(err.Error())
+}
+
+func TestIsPrivateIP_BlocksReservedRanges(t *testing.T) {
+	blocked := []string{
+		"0.0.0.0",         // unspecified / routes to loopback on Linux
+		"0.0.0.1",         // 0.0.0.0/8
+		"100.64.0.0",      // CGNAT 100.64.0.0/10
+		"100.127.255.255", // CGNAT upper
+		"192.0.0.1",       // 192.0.0.0/24 IETF protocol assignments
+		"::",              // IPv6 unspecified ::/128
+	}
+	for _, s := range blocked {
+		ip := net.ParseIP(s)
+		require.NotNil(t, ip, "parse %s", s)
+		require.True(t, isPrivateIP(ip), "%s must be treated as private/blocked", s)
+	}
+}
+
+func TestIsPrivateIP_AllowsPublic(t *testing.T) {
+	pub := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"}
+	for _, s := range pub {
+		ip := net.ParseIP(s)
+		require.NotNil(t, ip, "parse %s", s)
+		require.False(t, isPrivateIP(ip), "%s must be allowed (public)", s)
+	}
 }
