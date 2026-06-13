@@ -36,6 +36,24 @@ const (
 	janitorInterval    = 1 * time.Minute
 )
 
+// hostResolverRules forces Chrome to fail DNS resolution for private/internal
+// IP ranges and localhost, so in-page fetch() and evaluate()'d JS cannot reach
+// cloud-metadata endpoints or localhost services — the Go-side
+// ValidateURLNotInternal check only sees the top-level URL, so this covers
+// sub-resource and script-initiated requests. (S3)
+//
+// Residual gap: name-based rules do not stop a page that dials a *literal*
+// private IP URL in some Chrome builds; the complete fix is an allowlisting
+// proxy (deferred). See the security-deeper spec's limitations section.
+const hostResolverRules = "MAP localhost ~NOTFOUND," +
+	"MAP *.localhost ~NOTFOUND," +
+	"MAP 127.0.0.0/8 ~NOTFOUND," +
+	"MAP 10.0.0.0/8 ~NOTFOUND," +
+	"MAP 172.16.0.0/12 ~NOTFOUND," +
+	"MAP 169.254.0.0/16 ~NOTFOUND," +
+	"MAP 192.168.0.0/16 ~NOTFOUND," +
+	"MAP [::1] ~NOTFOUND"
+
 // stealthScript runs before any page script on every new document. It hides the
 // most common headless/automation tells that JS-heavy sites use to refuse to
 // render content (Cloudflare, Akamai, anti-bot scripts, "please enable JS"
@@ -474,6 +492,7 @@ func launchBrowser(parent context.Context) (context.Context, context.CancelFunc,
 			chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
 			chromedp.Flag("disable-blink-features", "AutomationControlled"),
 			chromedp.Flag("lang", "en-US"),
+			chromedp.Flag("host-resolver-rules", hostResolverRules),
 			chromedp.UserDataDir(udd),
 		)...,
 	)
