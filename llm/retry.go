@@ -52,8 +52,17 @@ func IsRetryableModelError(err error) bool {
 	// don't unwrap cleanly to typed errors. Cheap belt-and-braces;
 	// only reached when no typed match found above.
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "429") || strings.Contains(msg, "529") ||
-		strings.Contains(msg, "rate limit") || strings.Contains(msg, "overloaded") {
+	// Bounded forms so a bare "429"/"529" inside a request id or unrelated
+	// digits doesn't trigger a retry. Word matches stay as-is (specific).
+	for _, sig := range []string{
+		"status 429", "code: 429", "code:429", " 429 ", "429 too many requests",
+		"status 529", "code: 529", "code:529", " 529 ", "529 overloaded",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "overloaded") {
 		return true
 	}
 	return false
