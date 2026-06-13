@@ -338,6 +338,24 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		// Computed once per Run so the date stays stable across turns.
 		dateLine := FormatDateLine(time.Now())
 
+		// Tool defs are invariant for the whole Run (tools and permission don't
+		// change mid-Run), so normalize once instead of per turn (P3).
+		toolDefs := r.Tools.ToolDefs()
+		if r.Permission != nil {
+			toolDefs = r.Permission.FilterToolDefs(toolDefs, r.AgentID)
+		}
+		sort.SliceStable(toolDefs, func(i, j int) bool {
+			return toolDefs[i].Name < toolDefs[j].Name
+		})
+		toolDefs, diags := r.LLM.NormalizeToolSchema(toolDefs)
+		for _, d := range diags {
+			slog.Info("tool schema normalized",
+				"tool", d.ToolName,
+				"field", d.Field,
+				"action", d.Action,
+				"reason", d.Reason)
+		}
+
 		for turn := 0; turn < maxTurns; turn++ {
 			if ctx.Err() != nil {
 				stopReason = "aborted"
@@ -378,21 +396,6 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			spillCfg := spillConfig{Workspace: r.Workspace, SessionKey: r.Session.Key}
 			pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
 
-			toolDefs := r.Tools.ToolDefs()
-			if r.Permission != nil {
-				toolDefs = r.Permission.FilterToolDefs(toolDefs, r.AgentID)
-			}
-			sort.SliceStable(toolDefs, func(i, j int) bool {
-				return toolDefs[i].Name < toolDefs[j].Name
-			})
-			toolDefs, diags := r.LLM.NormalizeToolSchema(toolDefs)
-			for _, d := range diags {
-				slog.Info("tool schema normalized",
-					"tool", d.ToolName,
-					"field", d.Field,
-					"action", d.Action,
-					"reason", d.Reason)
-			}
 			tr.Mark("context.assemble", "turn", turn, "msgs", len(msgs), "tools", len(toolDefs), "sysprompt_chars", len(staticText)+len(dynamicSuffix), "dur_ms_local", time.Since(phaseStart).Milliseconds())
 
 			// Wait briefly on any in-flight async compaction kicked off by
