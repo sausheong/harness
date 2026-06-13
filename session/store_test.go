@@ -32,3 +32,21 @@ func TestStore_DegradedPersistenceWarnsOnce(t *testing.T) {
 	require.Equal(t, 1, strings.Count(buf.String(), "session persistence degraded"),
 		"degraded warning must fire exactly once across multiple failures")
 }
+
+func TestStore_RewriteDegradedWarns(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+	s := NewStore(blocker)
+
+	sess := &Session{AgentID: "a", Key: "k"}
+	s.Rewrite(sess)
+
+	require.Equal(t, 1, strings.Count(buf.String(), "session persistence degraded"),
+		"Rewrite failure must emit the degraded warning")
+}
