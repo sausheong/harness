@@ -132,10 +132,12 @@ func extractCommands(cmd string) []string {
 		// Find the earliest operator
 		minIdx := len(remaining)
 		opLen := 0
-		for _, op := range []string{"&&", "||", "|", ";"} {
-			if idx := strings.Index(remaining, op); idx != -1 && idx < minIdx {
-				minIdx = idx
-				opLen = len(op)
+		for _, op := range []string{"&&", "||", "|", ";", "&"} {
+			if idx := strings.Index(remaining, op); idx != -1 {
+				if idx < minIdx || (idx == minIdx && len(op) > opLen) {
+					minIdx = idx
+					opLen = len(op)
+				}
 			}
 		}
 

