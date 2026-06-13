@@ -6,6 +6,7 @@ import (
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	openai "github.com/sashabaranov/go-openai"
+	"google.golang.org/genai"
 )
 
 // IsRetryableModelError reports whether err is a transient capacity
@@ -14,14 +15,17 @@ import (
 //
 //   - Anthropic 429 (rate limit) and 529 (overloaded)
 //   - OpenAI 429 (rate limit) and 5xx (server / overloaded)
+//   - Gemini 429 (quota/RESOURCE_EXHAUSTED) and 5xx (overloaded/unavailable),
+//     recognized via a typed genai.APIError path (Gemini's error string
+//     "Error 429, ... Status: RESOURCE_EXHAUSTED" does not match the
+//     bounded substring forms, so the typed path is required).
 //
 // Anything else (including 4xx auth/validation errors) returns false:
 // retrying with a different model wouldn't fix the underlying problem.
 //
-// Errors from local providers (Ollama, etc.) and Gemini are NOT
-// classified as retryable here; their failure modes are different
-// and a model swap rarely helps. Add cases as new providers
-// accumulate retry experience.
+// Errors from local providers (Ollama, etc.) are NOT classified as
+// retryable here; their failure modes are different and a model swap
+// rarely helps. Add cases as new providers accumulate retry experience.
 func IsRetryableModelError(err error) bool {
 	if err == nil {
 		return false
@@ -46,6 +50,13 @@ func IsRetryableModelError(err error) bool {
 	if errors.As(err, &openaiReqErr) {
 		return openaiReqErr.HTTPStatusCode == 429 ||
 			(openaiReqErr.HTTPStatusCode >= 500 && openaiReqErr.HTTPStatusCode < 600)
+	}
+	// genai.APIError.Error() is a value receiver, so the error interface is
+	// satisfied by the value; errors.As targets the value type.
+	var genaiErr genai.APIError
+	if errors.As(err, &genaiErr) {
+		return genaiErr.Code == 429 ||
+			(genaiErr.Code >= 500 && genaiErr.Code < 600)
 	}
 
 	// Last-ditch: substring match on common SDK error wrappers that

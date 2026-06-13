@@ -9,7 +9,24 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 )
+
+func TestIsRetryable_Gemini429(t *testing.T) {
+	// Mirror genai.APIError's real shape.
+	err := genai.APIError{Code: 429, Message: "Resource has been exhausted (e.g. check quota).", Status: "RESOURCE_EXHAUSTED"}
+	require.True(t, IsRetryableModelError(err))
+}
+
+func TestIsRetryable_Gemini503(t *testing.T) {
+	err := genai.APIError{Code: 503, Message: "The model is overloaded.", Status: "UNAVAILABLE"}
+	require.True(t, IsRetryableModelError(err))
+}
+
+func TestIsRetryable_Gemini400NotRetryable(t *testing.T) {
+	err := genai.APIError{Code: 400, Message: "Invalid argument", Status: "INVALID_ARGUMENT"}
+	require.False(t, IsRetryableModelError(err))
+}
 
 func TestIsRetryableModelErrorAnthropic429(t *testing.T) {
 	err := &anthropic.Error{StatusCode: 429}
