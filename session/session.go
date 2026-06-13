@@ -85,6 +85,12 @@ type Session struct {
 	entryMap map[string]*SessionEntry
 	leafID   string // current leaf for history traversal
 	store    *Store
+
+	// writeMu serializes store writes and preserves their order. Acquired in
+	// Append while s.mu is still held (lock-coupling), then s.mu is released
+	// before the disk write — so disk latency stays off s.mu while on-disk
+	// order still matches in-memory append order under concurrent callers. (P5)
+	writeMu sync.Mutex
 }
 
 // NewSession creates a new empty session.
@@ -100,7 +106,6 @@ func NewSession(agentID, key string) *Session {
 // Append adds an entry to the session.
 func (s *Session) Append(entry SessionEntry) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if entry.ID == "" {
 		entry.ID = generateID("e")
 	}
@@ -115,9 +120,19 @@ func (s *Session) Append(entry SessionEntry) {
 	s.entryMap[entry.ID] = &s.entries[len(s.entries)-1]
 	s.leafID = entry.ID
 
-	// Persist if store is set
-	if s.store != nil {
-		s.store.AppendEntry(s, entry)
+	finalized := entry // value copy with all fields set
+	store := s.store
+
+	// Lock-coupling: take writeMu BEFORE releasing s.mu so the disk-write
+	// order matches the in-memory append order even under concurrent callers,
+	// then release s.mu so disk latency doesn't block concurrent View()/append.
+	if store != nil {
+		s.writeMu.Lock()
+		s.mu.Unlock()
+		store.AppendEntry(s, finalized)
+		s.writeMu.Unlock()
+	} else {
+		s.mu.Unlock()
 	}
 }
 

@@ -350,3 +350,60 @@ func TestSession_ViewReturnsCopy(t *testing.T) {
 	require.Len(t, v2, 1)
 	require.Equal(t, "e_1", v2[0].ID, "internal state must not be mutated by caller's slice modification")
 }
+
+func TestConcurrentAppendAndViewNoRace(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	require.NoError(t, store.Create("a", "k"))
+	sess := NewSession("a", "k")
+	sess.SetStore(store)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			sess.Append(SessionEntry{Type: EntryTypeMessage, Role: "user", Data: []byte(`{"text":"x"}`)})
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_ = sess.View()
+		}
+	}()
+	wg.Wait()
+
+	require.Len(t, sess.Entries(), 500)
+}
+
+// TestAppendPreservesDiskOrder verifies that the P5 lock-coupling keeps the
+// on-disk JSONL order identical to the in-memory append order: sequential
+// appends must persist in order, and reloading from disk must round-trip them
+// in the same sequence.
+func TestAppendPreservesDiskOrder(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	require.NoError(t, store.Create("a", "k"))
+	sess := NewSession("a", "k")
+	sess.SetStore(store)
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		sess.Append(SessionEntry{
+			Type: EntryTypeMessage,
+			Role: "user",
+			Data: json.RawMessage(fmt.Sprintf(`{"text":"%d"}`, i)),
+		})
+	}
+
+	reloaded, err := store.Load("a", "k")
+	require.NoError(t, err)
+	got := reloaded.Entries()
+	require.Len(t, got, n)
+	for i := 0; i < n; i++ {
+		require.JSONEq(t, fmt.Sprintf(`{"text":"%d"}`, i), string(got[i].Data),
+			"on-disk entry %d out of order", i)
+	}
+}

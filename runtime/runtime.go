@@ -105,6 +105,14 @@ type Runtime struct {
 	touchedMu    sync.Mutex
 	touchedFiles []string
 
+	// spilledIDs records ToolCallIDs whose oversized results have already
+	// been written to the deterministic spill path during this Runtime's
+	// lifetime. Content is immutable per ToolCallID, so once spilled we
+	// skip the (multi-MB) disk re-write on subsequent turns and only
+	// rebuild the in-memory marker.
+	spilledMu  sync.Mutex
+	spilledIDs map[string]bool
+
 	// IngestSource controls whether this run's thread is ingested into the KG.
 	// "chat" (or empty) ingests; any other value skips ingest.
 	IngestSource string
@@ -113,6 +121,12 @@ type Runtime struct {
 	CalibratorStore *tokens.CalibratorStore
 
 	calibrator *tokens.Calibrator
+
+	// calibratorDirty records that the calibrator was updated during this
+	// Run and must be flushed to CalibratorStore once at Run end. Accessed
+	// only on the Run goroutine (EventDone handling + deferred flush), so no
+	// lock is needed.
+	calibratorDirty bool
 
 	// mcpClients holds the MCP client sessions resolved from
 	// AgentSpec.MCPServers. Released by Close. Untouched when MCP is
@@ -235,6 +249,18 @@ func (r *Runtime) snapshotTouchedFiles() []string {
 	return out
 }
 
+// prune shortens oversized tool results in msgs, spilling to disk where
+// configured. It carries the Runtime's per-Run spilled-ID set so a result
+// already spilled this Run is not re-written to disk on subsequent turns.
+func (r *Runtime) prune(msgs []llm.Message, spillCfg spillConfig) {
+	r.spilledMu.Lock()
+	if r.spilledIDs == nil {
+		r.spilledIDs = map[string]bool{}
+	}
+	pruneToolResults(msgs, r.maxToolResultLen(), spillCfg, r.spilledIDs)
+	r.spilledMu.Unlock()
+}
+
 // isFileTool reports whether a tool name's input contains a "path" field.
 func isFileTool(name string) bool {
 	switch name {
@@ -253,6 +279,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 	go func() {
 		defer close(r.events)
 		defer tr.Summary()
+
+		// Flush the per-session calibrator once at Run end (all exit paths:
+		// normal, error, abort) instead of writing to disk on every LLM
+		// round. EventDone sets calibratorDirty when it folds in a usage
+		// sample; this defer persists the final state. Registered here so it
+		// runs regardless of which return below fires.
+		defer func() {
+			if r.calibratorDirty && r.CalibratorStore != nil && r.Session != nil && r.calibrator != nil {
+				ratio, count := r.calibrator.Snapshot()
+				r.CalibratorStore.Save(r.AgentID, r.Session.Key, ratio, count)
+			}
+		}()
 
 		// stopReason is read by the OnStop deferred hook below. Each early
 		// return path reassigns it before returning. Default is "max_turns"
@@ -338,6 +376,24 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		// Computed once per Run so the date stays stable across turns.
 		dateLine := FormatDateLine(time.Now())
 
+		// Tool defs are invariant for the whole Run (tools and permission don't
+		// change mid-Run), so normalize once instead of per turn (P3).
+		toolDefs := r.Tools.ToolDefs()
+		if r.Permission != nil {
+			toolDefs = r.Permission.FilterToolDefs(toolDefs, r.AgentID)
+		}
+		sort.SliceStable(toolDefs, func(i, j int) bool {
+			return toolDefs[i].Name < toolDefs[j].Name
+		})
+		toolDefs, diags := r.LLM.NormalizeToolSchema(toolDefs)
+		for _, d := range diags {
+			slog.Info("tool schema normalized",
+				"tool", d.ToolName,
+				"field", d.Field,
+				"action", d.Action,
+				"reason", d.Reason)
+		}
+
 		for turn := 0; turn < maxTurns; turn++ {
 			if ctx.Err() != nil {
 				stopReason = "aborted"
@@ -376,23 +432,8 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			msgs := assembleMessages(history)
 
 			spillCfg := spillConfig{Workspace: r.Workspace, SessionKey: r.Session.Key}
-			pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+			r.prune(msgs, spillCfg)
 
-			toolDefs := r.Tools.ToolDefs()
-			if r.Permission != nil {
-				toolDefs = r.Permission.FilterToolDefs(toolDefs, r.AgentID)
-			}
-			sort.SliceStable(toolDefs, func(i, j int) bool {
-				return toolDefs[i].Name < toolDefs[j].Name
-			})
-			toolDefs, diags := r.LLM.NormalizeToolSchema(toolDefs)
-			for _, d := range diags {
-				slog.Info("tool schema normalized",
-					"tool", d.ToolName,
-					"field", d.Field,
-					"action", d.Action,
-					"reason", d.Reason)
-			}
 			tr.Mark("context.assemble", "turn", turn, "msgs", len(msgs), "tools", len(toolDefs), "sysprompt_chars", len(staticText)+len(dynamicSuffix), "dur_ms_local", time.Since(phaseStart).Milliseconds())
 
 			// Wait briefly on any in-flight async compaction kicked off by
@@ -402,7 +443,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 					history = r.Session.View()
 					msgs = assembleMessages(history)
-					pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+					r.prune(msgs, spillCfg)
 					msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 				}
 			}
@@ -428,7 +469,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+						r.prune(msgs, spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 					} else {
 						r.emit(AgentEvent{Type: EventCompactionSkipped, Compaction: &res})
@@ -461,7 +502,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+						r.prune(msgs, spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 						req.Messages = msgs
 						stream, err = r.LLM.ChatStream(ctx, req)
@@ -549,11 +590,14 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							lastUsage = event.Usage
 						}
 						if event.Usage != nil && r.calibrator != nil {
+							// Recompute the estimate on the CURRENT msgs (which may
+							// have been reassembled by mid-turn compaction) so the
+							// calibration ratio matches event.Usage.InputTokens, as
+							// the pre-debounce code did. The P8 change only debounces
+							// the disk write (calibratorDirty + deferred flush), not
+							// the estimate computation.
 							r.calibrator.Update(event.Usage.InputTokens, tokens.Estimate(msgs, llm.JoinSystemPromptParts(parts), toolDefs))
-							if r.CalibratorStore != nil && r.Session != nil {
-								ratio, count := r.calibrator.Snapshot()
-								r.CalibratorStore.Save(r.AgentID, r.Session.Key, ratio, count)
-							}
+							r.calibratorDirty = true
 						}
 
 					case llm.EventError:
@@ -770,7 +814,7 @@ func (r *Runtime) recoverFromPreTokenError(ctx context.Context, err error, req *
 			r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 			history := r.Session.View()
 			newMsgs := assembleMessages(history)
-			pruneToolResults(newMsgs, r.maxToolResultLen(), spillCfg)
+			r.prune(newMsgs, spillCfg)
 			newMsgs = prependPostCompactRestore(newMsgs, r.snapshotTouchedFiles())
 			*msgs = newMsgs
 			req.Messages = newMsgs
