@@ -896,6 +896,37 @@ func TestRun_AbortMidDispatchProducesPairedSession(t *testing.T) {
 	}
 }
 
+// TestRunSync_ReturnsErrorOnAbort verifies that RunSync surfaces an aborted run
+// as a non-nil error (context.Canceled) rather than returning (partialText,
+// nil). Cron/sync callers must be able to distinguish a completed run from a
+// cancelled one. Reuses the same abort scaffolding as
+// TestRun_AbortMidDispatchProducesPairedSession (a tool batch + cancelOnNth).
+func TestRunSync_ReturnsErrorOnAbort(t *testing.T) {
+	threeToolCalls := []llm.ToolCall{
+		{ID: "tc_0", Name: "noop", Input: json.RawMessage(`{}`)},
+		{ID: "tc_1", Name: "noop", Input: json.RawMessage(`{}`)},
+		{ID: "tc_2", Name: "noop", Input: json.RawMessage(`{}`)},
+	}
+	llmFake := &threeToolCallLLM{toolCalls: threeToolCalls}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	count := 0
+	exec := &cancelOnNthExecutor{n: 1, cancel: cancel, count: &count}
+
+	r := &Runtime{
+		LLM:      llmFake,
+		Tools:    exec,
+		Session:  session.NewSession("a", "k"),
+		AgentID:  "a",
+		Model:    "test-model",
+		MaxTurns: 5,
+	}
+
+	_, err := r.RunSync(ctx, "go", nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 // threeToolCallLLM emits the configured tool_calls as one assistant turn,
 // then EventDone. On the next call (after tool results, if the runtime
 // loops back), emits only EventDone with no tool_calls so Run terminates.

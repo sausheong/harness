@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sausheong/harness/llm"
 )
@@ -95,6 +96,17 @@ func TestContextWindowProxyProviderDetectedByModelFamily(t *testing.T) {
 			assert.Equal(t, tc.want, ContextWindow(tc.model))
 		})
 	}
+}
+
+func TestEstimate_CountsImages(t *testing.T) {
+	textOnly := []llm.Message{{Role: "user", Content: "hello"}}
+	withImg := []llm.Message{{Role: "user", Content: "hello", Images: []llm.ImageContent{
+		{MimeType: "image/png", Data: []byte("x")},
+		{MimeType: "image/png", Data: []byte("y")},
+	}}}
+	base := Estimate(textOnly, "", nil)
+	withImages := Estimate(withImg, "", nil)
+	require.GreaterOrEqual(t, withImages-base, 2*perImageTokens)
 }
 
 func TestContextWindowOllamaDefault(t *testing.T) {

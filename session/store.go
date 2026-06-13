@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,8 +23,19 @@ type SessionInfo struct {
 
 // Store handles JSONL file I/O for sessions.
 type Store struct {
-	baseDir string
-	mu      sync.Mutex
+	baseDir  string
+	mu       sync.Mutex
+	degraded atomic.Bool
+}
+
+// markDegraded emits a single warning the first time session persistence
+// fails, so a user notices that in-memory state may not survive a restart.
+// Subsequent failures stay at their existing Error level to avoid log spam.
+func (s *Store) markDegraded(reason string, err error) {
+	if s.degraded.CompareAndSwap(false, true) {
+		slog.Warn("session persistence degraded; in-memory state may not survive restart",
+			"reason", reason, "error", err)
+	}
 }
 
 // NewStore creates a new session store.
@@ -94,6 +106,7 @@ func (s *Store) AppendEntry(sess *Session, entry SessionEntry) {
 
 	dir := s.sessionDir(sess.AgentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		s.markDegraded("create session dir", err)
 		slog.Error("failed to create session dir", "error", err)
 		return
 	}
@@ -101,6 +114,7 @@ func (s *Store) AppendEntry(sess *Session, entry SessionEntry) {
 	path := s.sessionPath(sess.AgentID, sess.Key)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		s.markDegraded("open session file", err)
 		slog.Error("failed to open session file", "error", err)
 		return
 	}
@@ -114,6 +128,7 @@ func (s *Store) AppendEntry(sess *Session, entry SessionEntry) {
 
 	data = append(data, '\n')
 	if _, err := f.Write(data); err != nil {
+		s.markDegraded("write session entry", err)
 		slog.Error("failed to write session entry", "error", err)
 	}
 }
@@ -252,6 +267,7 @@ func (s *Store) Rewrite(sess *Session) {
 
 	dir := s.sessionDir(sess.AgentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		s.markDegraded("create session dir", err)
 		slog.Error("failed to create session dir", "error", err)
 		return
 	}
@@ -260,6 +276,7 @@ func (s *Store) Rewrite(sess *Session) {
 
 	f, err := os.Create(path)
 	if err != nil {
+		s.markDegraded("create session file for rewrite", err)
 		slog.Error("failed to create session file for rewrite", "error", err)
 		return
 	}
@@ -277,6 +294,7 @@ func (s *Store) Rewrite(sess *Session) {
 	}
 
 	if err := w.Flush(); err != nil {
+		s.markDegraded("flush session file", err)
 		slog.Error("failed to flush session file", "error", err)
 	}
 }
