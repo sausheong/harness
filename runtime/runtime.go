@@ -849,6 +849,8 @@ func (r *Runtime) RunSync(ctx context.Context, userMsg string, images []llm.Imag
 		switch event.Type {
 		case EventTextDelta:
 			response.WriteString(event.Text)
+		case EventAborted:
+			return response.String(), context.Canceled
 		case EventError:
 			return response.String(), event.Error
 		}
