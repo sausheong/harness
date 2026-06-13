@@ -8,6 +8,7 @@ import (
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsRetryableModelErrorAnthropic429(t *testing.T) {
@@ -88,4 +89,14 @@ func TestIsRetryableModelErrorOtherErrorStringRateLimit(t *testing.T) {
 func TestIsRetryableModelErrorUnrelatedError(t *testing.T) {
 	err := errors.New("some other failure")
 	assert.False(t, IsRetryableModelError(err))
+}
+
+func TestRetry_DigitsInRequestIDNotRetryable(t *testing.T) {
+	err := errors.New("request failed: req_abc429def something went wrong")
+	require.False(t, IsRetryableModelError(err))
+}
+
+func TestRetry_RealStatus429Retryable(t *testing.T) {
+	err := errors.New("openai: error, status 429 too many requests")
+	require.True(t, IsRetryableModelError(err))
 }
