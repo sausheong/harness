@@ -14,9 +14,13 @@ var privateNetworks = []string{
 	"172.16.0.0/12",  // RFC 1918
 	"192.168.0.0/16", // RFC 1918
 	"169.254.0.0/16", // link-local
+	"0.0.0.0/8",      // "this" network / unspecified; routes to loopback on Linux
+	"100.64.0.0/10",  // CGNAT (RFC 6598)
+	"192.0.0.0/24",   // IETF protocol assignments (RFC 6890)
 	"::1/128",        // IPv6 loopback
 	"fc00::/7",       // IPv6 unique local
 	"fe80::/10",      // IPv6 link-local
+	"::/128",         // IPv6 unspecified
 }
 
 var parsedPrivateNets []*net.IPNet
