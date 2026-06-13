@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,13 +94,31 @@ func (t *ReadFileTool) Execute(_ context.Context, input json.RawMessage) (tool.T
 		}
 	}
 
-	data, err := os.ReadFile(in.Path)
+	ext := strings.ToLower(filepath.Ext(in.Path))
+	limit := int64(maxTextFileSize)
+	kind := "text"
+	if _, isImg := imageExtMap[ext]; isImg {
+		limit = int64(maxImageFileSize)
+		kind = "image"
+	}
+	if msg := checkFileSize(in.Path, limit, kind); msg != "" {
+		return tool.ToolResult{Error: msg}, nil
+	}
+
+	f, err := os.Open(in.Path)
 	if err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("failed to read file: %v", err)}, nil
 	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return tool.ToolResult{Error: fmt.Sprintf("failed to read file: %v", err)}, nil
+	}
+	if int64(len(data)) > limit {
+		return tool.ToolResult{Error: fmt.Sprintf("file too large: exceeds the %d byte limit for %s files; read a specific range or use a different tool", limit, kind)}, nil
+	}
 
 	// Check if this is an image file
-	ext := strings.ToLower(filepath.Ext(in.Path))
 	if mimeType, ok := imageExtMap[ext]; ok {
 		mimeType = detectImageMIMEFromBytes(data, mimeType)
 		return tool.ToolResult{

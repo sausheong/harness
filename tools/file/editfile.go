@@ -74,6 +74,10 @@ func (t *EditFileTool) Execute(_ context.Context, input json.RawMessage) (tool.T
 		}
 	}
 
+	if msg := checkFileSize(in.Path, int64(maxTextFileSize), "text"); msg != "" {
+		return tool.ToolResult{Error: msg}, nil
+	}
+
 	data, err := os.ReadFile(in.Path)
 	if err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("failed to read file: %v", err)}, nil
