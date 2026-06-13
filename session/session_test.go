@@ -377,3 +377,33 @@ func TestConcurrentAppendAndViewNoRace(t *testing.T) {
 
 	require.Len(t, sess.Entries(), 500)
 }
+
+// TestAppendPreservesDiskOrder verifies that the P5 lock-coupling keeps the
+// on-disk JSONL order identical to the in-memory append order: sequential
+// appends must persist in order, and reloading from disk must round-trip them
+// in the same sequence.
+func TestAppendPreservesDiskOrder(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	require.NoError(t, store.Create("a", "k"))
+	sess := NewSession("a", "k")
+	sess.SetStore(store)
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		sess.Append(SessionEntry{
+			Type: EntryTypeMessage,
+			Role: "user",
+			Data: json.RawMessage(fmt.Sprintf(`{"text":"%d"}`, i)),
+		})
+	}
+
+	reloaded, err := store.Load("a", "k")
+	require.NoError(t, err)
+	got := reloaded.Entries()
+	require.Len(t, got, n)
+	for i := 0; i < n; i++ {
+		require.JSONEq(t, fmt.Sprintf(`{"text":"%d"}`, i), string(got[i].Data),
+			"on-disk entry %d out of order", i)
+	}
+}
