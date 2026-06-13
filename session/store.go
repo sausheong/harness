@@ -267,6 +267,7 @@ func (s *Store) Rewrite(sess *Session) {
 
 	dir := s.sessionDir(sess.AgentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		s.markDegraded("create session dir", err)
 		slog.Error("failed to create session dir", "error", err)
 		return
 	}
@@ -275,6 +276,7 @@ func (s *Store) Rewrite(sess *Session) {
 
 	f, err := os.Create(path)
 	if err != nil {
+		s.markDegraded("create session file for rewrite", err)
 		slog.Error("failed to create session file for rewrite", "error", err)
 		return
 	}
@@ -292,6 +294,7 @@ func (s *Store) Rewrite(sess *Session) {
 	}
 
 	if err := w.Flush(); err != nil {
+		s.markDegraded("flush session file", err)
 		slog.Error("failed to flush session file", "error", err)
 	}
 }
