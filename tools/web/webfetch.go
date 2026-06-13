@@ -85,19 +85,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, input json.RawMessage) (tool
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{
-		Timeout: fetchTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects (max 10)")
-			}
-			// Re-validate each redirect destination against SSRF blocklist
-			if err := ValidateURLNotInternal(req.URL.String()); err != nil {
-				return fmt.Errorf("redirect blocked: %w", err)
-			}
-			return nil
-		},
-	}
+	client := SafeHTTPClient(fetchTimeout)
 
 	resp, err := client.Do(req)
 	if err != nil {
