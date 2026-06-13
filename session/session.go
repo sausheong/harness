@@ -100,7 +100,6 @@ func NewSession(agentID, key string) *Session {
 // Append adds an entry to the session.
 func (s *Session) Append(entry SessionEntry) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if entry.ID == "" {
 		entry.ID = generateID("e")
 	}
@@ -115,9 +114,15 @@ func (s *Session) Append(entry SessionEntry) {
 	s.entryMap[entry.ID] = &s.entries[len(s.entries)-1]
 	s.leafID = entry.ID
 
-	// Persist if store is set
-	if s.store != nil {
-		s.store.AppendEntry(s, entry)
+	finalized := entry // value copy with all fields set
+	store := s.store
+	s.mu.Unlock()
+
+	// Persist after releasing s.mu so disk latency doesn't block concurrent
+	// View()/append callers. Store.mu still serializes the file write and
+	// preserves append ordering (callers reach this point in lock order). (P5)
+	if store != nil {
+		store.AppendEntry(s, finalized)
 	}
 }
 
