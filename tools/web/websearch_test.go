@@ -27,3 +27,11 @@ func TestSearxng_BlocksPrivateBaseURL(t *testing.T) {
 	_, err := b.Search(testCtx(t), "hello", 3)
 	require.Error(t, err)
 }
+
+func TestCleanHTMLText_DecodesNumericEntities(t *testing.T) {
+	out := cleanHTMLText("<b>caf&#233;</b> &amp; t&#8217;is &nbsp;done")
+	require.Contains(t, out, "café")
+	require.Contains(t, out, "&", "amp must decode")
+	require.Contains(t, out, "t’is", "numeric entity must decode")
+	require.NotContains(t, out, "&#", "no raw numeric entities remain")
+}

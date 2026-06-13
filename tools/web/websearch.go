@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -271,11 +272,6 @@ func cleanHTMLText(s string) string {
 		}
 	}
 	result := out.String()
-	result = strings.ReplaceAll(result, "&amp;", "&")
-	result = strings.ReplaceAll(result, "&lt;", "<")
-	result = strings.ReplaceAll(result, "&gt;", ">")
-	result = strings.ReplaceAll(result, "&quot;", `"`)
-	result = strings.ReplaceAll(result, "&#x27;", "'")
-	result = strings.ReplaceAll(result, "&nbsp;", " ")
+	result = html.UnescapeString(result)
 	return strings.TrimSpace(result)
 }
