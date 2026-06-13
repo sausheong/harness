@@ -447,7 +447,7 @@ func spillToolResult(cfg spillConfig, toolCallID, content string) (string, error
 // nearest newline boundary — most tool outputs (file reads, command
 // output) are front-loaded with the most relevant info, so the head
 // preview is usually enough on its own.
-func pruneToolResults(msgs []llm.Message, maxLen int, cfg spillConfig) {
+func pruneToolResults(msgs []llm.Message, maxLen int, cfg spillConfig, spilled map[string]bool) {
 	for i := range msgs {
 		if msgs[i].ToolCallID == "" || len(msgs[i].Content) <= maxLen {
 			continue
@@ -467,9 +467,23 @@ func pruneToolResults(msgs []llm.Message, maxLen int, cfg spillConfig) {
 		// Try spill first if configured. On any failure, fall through to
 		// legacy truncation so the prefill stays bounded either way.
 		if cfg.Workspace != "" && cfg.SessionKey != "" {
-			if path, err := spillToolResult(cfg, msgs[i].ToolCallID, msgs[i].Content); err == nil {
+			id := msgs[i].ToolCallID
+			// Spill content is immutable per ToolCallID and lands at a
+			// deterministic path. If this Run already spilled this ID,
+			// skip the (multi-MB) disk re-write and just rebuild the
+			// in-memory marker pointing at the same path.
+			if spilled != nil && spilled[id] {
+				path := filepath.Join(cfg.Workspace, ".harness", "spill", cfg.SessionKey, id+".txt")
 				msgs[i].Content = fmt.Sprintf("%s\n\n%s%d of %d chars saved to %s; use read_file to access the full output]",
 					head, spillMarker, len(head), originalLen, path)
+				continue
+			}
+			if writtenPath, err := spillToolResult(cfg, id, msgs[i].Content); err == nil {
+				if spilled != nil {
+					spilled[id] = true
+				}
+				msgs[i].Content = fmt.Sprintf("%s\n\n%s%d of %d chars saved to %s; use read_file to access the full output]",
+					head, spillMarker, len(head), originalLen, writtenPath)
 				continue
 			}
 		}
