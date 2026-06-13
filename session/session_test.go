@@ -350,3 +350,30 @@ func TestSession_ViewReturnsCopy(t *testing.T) {
 	require.Len(t, v2, 1)
 	require.Equal(t, "e_1", v2[0].ID, "internal state must not be mutated by caller's slice modification")
 }
+
+func TestConcurrentAppendAndViewNoRace(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	require.NoError(t, store.Create("a", "k"))
+	sess := NewSession("a", "k")
+	sess.SetStore(store)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			sess.Append(SessionEntry{Type: EntryTypeMessage, Role: "user", Data: []byte(`{"text":"x"}`)})
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			_ = sess.View()
+		}
+	}()
+	wg.Wait()
+
+	require.Len(t, sess.Entries(), 500)
+}
