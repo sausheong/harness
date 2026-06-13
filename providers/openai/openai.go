@@ -332,7 +332,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 						}
 					}
 					if tc.Function.Arguments != "" {
-						pending.argsJSON += tc.Function.Arguments
+						pending.args.WriteString(tc.Function.Arguments)
 					}
 				}
 
@@ -353,9 +353,9 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 // streamed tool-call index is the map key in toolCalls; the id, name, and
 // arguments arrive in separate chunks.
 type pendingTC struct {
-	id       string
-	name     string
-	argsJSON string
+	id   string
+	name string
+	args strings.Builder
 }
 
 // emitToolCalls sends EventToolCallDone for each completed tool call in
@@ -379,7 +379,7 @@ func emitToolCalls(events chan<- llm.ChatEvent, toolCalls map[int]*pendingTC) {
 			ToolCall: &llm.ToolCall{
 				ID:    tc.id,
 				Name:  tc.name,
-				Input: json.RawMessage(tc.argsJSON),
+				Input: json.RawMessage(tc.args.String()),
 			},
 		}
 	}

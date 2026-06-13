@@ -75,11 +75,12 @@ func TestOpenAIChatStreamPartsBeatString(t *testing.T) {
 }
 
 func TestEmitToolCalls_OrderedByIndex(t *testing.T) {
-	toolCalls := map[int]*pendingTC{
-		2: {id: "c", name: "third", argsJSON: "{}"},
-		0: {id: "a", name: "first", argsJSON: "{}"},
-		1: {id: "b", name: "second", argsJSON: "{}"},
+	mk := func(id, name string) *pendingTC {
+		p := &pendingTC{id: id, name: name}
+		p.args.WriteString("{}")
+		return p
 	}
+	toolCalls := map[int]*pendingTC{2: mk("c", "third"), 0: mk("a", "first"), 1: mk("b", "second")}
 	ch := make(chan llm.ChatEvent, 10)
 	emitToolCalls(ch, toolCalls)
 	close(ch)
