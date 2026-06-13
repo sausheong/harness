@@ -73,3 +73,21 @@ func TestOpenAIChatStreamPartsBeatString(t *testing.T) {
 	require.GreaterOrEqual(t, len(captured.Messages), 1)
 	require.Equal(t, "new", captured.Messages[0].Content)
 }
+
+func TestEmitToolCalls_OrderedByIndex(t *testing.T) {
+	toolCalls := map[int]*pendingTC{
+		2: {id: "c", name: "third", argsJSON: "{}"},
+		0: {id: "a", name: "first", argsJSON: "{}"},
+		1: {id: "b", name: "second", argsJSON: "{}"},
+	}
+	ch := make(chan llm.ChatEvent, 10)
+	emitToolCalls(ch, toolCalls)
+	close(ch)
+	var ids []string
+	for ev := range ch {
+		if ev.Type == llm.EventToolCallDone {
+			ids = append(ids, ev.ToolCall.ID)
+		}
+	}
+	require.Equal(t, []string{"a", "b", "c"}, ids, "tool calls must emit in index order")
+}
