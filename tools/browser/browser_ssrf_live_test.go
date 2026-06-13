@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +20,25 @@ func TestInPageFetchPrivateIPBlocked_Live(t *testing.T) {
 	defer tool.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	res, err := tool.Execute(ctx, []byte(`{"action":"evaluate","url":"https://example.com","session":"ssrf","script":"fetch('http://169.254.169.254/').then(()=>'REACHED').catch(e=>'BLOCKED:'+e)"}`))
+
+	taskCtx, ccancel, err := launchBrowser(ctx)
 	require.NoError(t, err)
-	require.NotContains(t, res.Output, "REACHED")
+	defer ccancel()
+
+	require.NoError(t, chromedp.Run(taskCtx, chromedp.Navigate("https://example.com")))
+
+	var result string
+	script := `(async () => {
+		try {
+			await fetch('http://169.254.169.254/latest/meta-data/', {mode:'no-cors'});
+			return 'REACHED';
+		} catch (e) {
+			return 'BLOCKED';
+		}
+	})()`
+	err = chromedp.Run(taskCtx, chromedp.Evaluate(script, &result, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return p.WithAwaitPromise(true)
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "BLOCKED", result, "in-page fetch to metadata IP must be blocked by host-resolver-rules")
 }
