@@ -17,6 +17,10 @@ import (
 // are constructed with their config (API key, base URL, etc.) at
 // registration time and remain immutable thereafter. This keeps the tool
 // dispatch path zero-allocation in the hot loop.
+//
+// Implementations that make outbound HTTP calls MUST use the package
+// searchClient (SafeHTTPClient) so a configured/typo'd internal base URL
+// cannot be used for SSRF. (N4)
 type WebSearchBackend interface {
 	Name() string
 	Search(ctx context.Context, query string, maxResults int) ([]searchResult, error)
@@ -58,7 +62,7 @@ func (b *braveBackend) Search(ctx context.Context, q string, n int) ([]searchRes
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Subscription-Token", b.apiKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := searchClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +123,7 @@ func (b *tavilyBackend) Search(ctx context.Context, q string, n int) ([]searchRe
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := searchClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +173,7 @@ func (b *searxngBackend) Search(ctx context.Context, q string, n int) ([]searchR
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := searchClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
