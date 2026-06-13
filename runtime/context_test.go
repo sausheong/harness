@@ -1,12 +1,14 @@
 package runtime
 
 import (
+	jsonpkg "encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sausheong/harness/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,4 +124,29 @@ func TestFormatDateLine(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func mustJSON(t *testing.T, v any) jsonpkg.RawMessage {
+	t.Helper()
+	b, err := jsonpkg.Marshal(v)
+	require.NoError(t, err)
+	return b
+}
+
+func TestAssembleMessagesInjectsOrphanedToolResult(t *testing.T) {
+	history := []session.SessionEntry{
+		{Type: session.EntryTypeMessage, Role: "user", Data: mustJSON(t, session.MessageData{Text: "hi"})},
+		{Type: session.EntryTypeToolCall, Role: "assistant", Data: mustJSON(t, session.ToolCallData{
+			ID: "call_1", Tool: "bash", Input: jsonpkg.RawMessage(`{}`),
+		})},
+		{Type: session.EntryTypeMessage, Role: "user", Data: mustJSON(t, session.MessageData{Text: "still there?"})},
+	}
+	msgs := assembleMessages(history)
+	var found bool
+	for _, m := range msgs {
+		if m.ToolCallID == "call_1" {
+			found = true
+		}
+	}
+	require.True(t, found, "orphaned tool call must get a synthetic tool result from the terminal pass")
 }
