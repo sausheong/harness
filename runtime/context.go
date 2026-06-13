@@ -168,17 +168,6 @@ func buildDynamicSystemPromptSuffix(dateLine, cortexContext string) string {
 // corresponding tool_result in the next user message. Orphaned tool calls
 // (e.g. from interrupted sessions) get synthetic error results injected.
 func assembleMessages(history []session.SessionEntry) []llm.Message {
-	// First pass: collect tool result IDs so we can detect orphaned tool calls.
-	resultIDs := make(map[string]bool)
-	for _, entry := range history {
-		if entry.Type == session.EntryTypeToolResult {
-			var tr session.ToolResultData
-			if err := json.Unmarshal(entry.Data, &tr); err == nil {
-				resultIDs[tr.ToolCallID] = true
-			}
-		}
-	}
-
 	var msgs []llm.Message
 
 	for _, entry := range history {
@@ -219,9 +208,6 @@ func assembleMessages(history []session.SessionEntry) []llm.Message {
 			if err := json.Unmarshal(entry.Data, &md); err != nil {
 				continue
 			}
-			// Before appending a new message, check if the last assistant
-			// message has orphaned tool calls that need synthetic results.
-			msgs = injectMissingToolResults(msgs)
 			msg := llm.Message{
 				Role:    entry.Role,
 				Content: md.Text,
