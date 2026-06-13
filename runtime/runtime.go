@@ -105,6 +105,14 @@ type Runtime struct {
 	touchedMu    sync.Mutex
 	touchedFiles []string
 
+	// spilledIDs records ToolCallIDs whose oversized results have already
+	// been written to the deterministic spill path during this Runtime's
+	// lifetime. Content is immutable per ToolCallID, so once spilled we
+	// skip the (multi-MB) disk re-write on subsequent turns and only
+	// rebuild the in-memory marker.
+	spilledMu  sync.Mutex
+	spilledIDs map[string]bool
+
 	// IngestSource controls whether this run's thread is ingested into the KG.
 	// "chat" (or empty) ingests; any other value skips ingest.
 	IngestSource string
@@ -239,6 +247,18 @@ func (r *Runtime) snapshotTouchedFiles() []string {
 	out := make([]string, len(r.touchedFiles))
 	copy(out, r.touchedFiles)
 	return out
+}
+
+// prune shortens oversized tool results in msgs, spilling to disk where
+// configured. It carries the Runtime's per-Run spilled-ID set so a result
+// already spilled this Run is not re-written to disk on subsequent turns.
+func (r *Runtime) prune(msgs []llm.Message, spillCfg spillConfig) {
+	r.spilledMu.Lock()
+	if r.spilledIDs == nil {
+		r.spilledIDs = map[string]bool{}
+	}
+	pruneToolResults(msgs, r.maxToolResultLen(), spillCfg, r.spilledIDs)
+	r.spilledMu.Unlock()
 }
 
 // isFileTool reports whether a tool name's input contains a "path" field.
@@ -412,7 +432,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			msgs := assembleMessages(history)
 
 			spillCfg := spillConfig{Workspace: r.Workspace, SessionKey: r.Session.Key}
-			pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+			r.prune(msgs, spillCfg)
 
 			tr.Mark("context.assemble", "turn", turn, "msgs", len(msgs), "tools", len(toolDefs), "sysprompt_chars", len(staticText)+len(dynamicSuffix), "dur_ms_local", time.Since(phaseStart).Milliseconds())
 
@@ -423,7 +443,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 					history = r.Session.View()
 					msgs = assembleMessages(history)
-					pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+					r.prune(msgs, spillCfg)
 					msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 				}
 			}
@@ -457,7 +477,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+						r.prune(msgs, spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 					} else {
 						r.emit(AgentEvent{Type: EventCompactionSkipped, Compaction: &res})
@@ -490,7 +510,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 						history = r.Session.View()
 						msgs = assembleMessages(history)
-						pruneToolResults(msgs, r.maxToolResultLen(), spillCfg)
+						r.prune(msgs, spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 						req.Messages = msgs
 						stream, err = r.LLM.ChatStream(ctx, req)
@@ -800,7 +820,7 @@ func (r *Runtime) recoverFromPreTokenError(ctx context.Context, err error, req *
 			r.emit(AgentEvent{Type: EventCompactionDone, Compaction: &res})
 			history := r.Session.View()
 			newMsgs := assembleMessages(history)
-			pruneToolResults(newMsgs, r.maxToolResultLen(), spillCfg)
+			r.prune(newMsgs, spillCfg)
 			newMsgs = prependPostCompactRestore(newMsgs, r.snapshotTouchedFiles())
 			*msgs = newMsgs
 			req.Messages = newMsgs
