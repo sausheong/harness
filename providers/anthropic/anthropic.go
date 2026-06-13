@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -164,8 +165,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 		type pendingTC struct {
 			id         string
 			name       string
-			inputJSON  string // built from input_json_delta events
-			startInput string // captured from content_block_start (proxy fallback)
+			inputJSON  strings.Builder // built from input_json_delta events
+			startInput string          // captured from content_block_start (proxy fallback)
 		}
 		var pendingTools []pendingTC
 		var currentBlockType string
@@ -220,18 +221,21 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 					}
 				case "input_json_delta":
 					if len(pendingTools) > 0 {
-						pendingTools[len(pendingTools)-1].inputJSON += delta.PartialJSON
+						pendingTools[len(pendingTools)-1].inputJSON.WriteString(delta.PartialJSON)
 					}
 				}
 
 			case "content_block_stop":
 				if currentBlockType == "tool_use" && len(pendingTools) > 0 {
-					tc := pendingTools[len(pendingTools)-1]
+					// Index in place rather than copying the element: the
+					// pendingTC holds a strings.Builder, which must not be
+					// copied after first write (vet copylock).
+					tc := &pendingTools[len(pendingTools)-1]
 					// Prefer streamed deltas (canonical Anthropic). Fall
 					// back to start-time input (proxy emitting full input
 					// upfront). Default to "{}" so MCP servers receive a
 					// valid empty-args envelope rather than null/empty.
-					inp := tc.inputJSON
+					inp := tc.inputJSON.String()
 					if inp == "" {
 						inp = tc.startInput
 					}
@@ -281,7 +285,14 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 				// Final event — nothing extra to emit
 
 			case "error":
-				slog.Error("anthropic stream error", "event", event.Type)
+				// The SDK surfaces error detail via stream.Err() (handled after
+				// the loop); this in-band branch must not be a silent no-op —
+				// emit an EventError so the runtime treats it as a failure.
+				slog.Error("anthropic stream error event", "event", event.Type)
+				events <- llm.ChatEvent{
+					Type:  llm.EventError,
+					Error: fmt.Errorf("anthropic stream error event"),
+				}
 			}
 		}
 

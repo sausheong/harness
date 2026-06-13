@@ -72,7 +72,7 @@ func detectImageMIMEFromBytes(data []byte, hint string) string {
 // IsConcurrencySafe returns true — read_file is a pure read.
 func (t *ReadFileTool) IsConcurrencySafe(_ json.RawMessage) bool { return true }
 
-func (t *ReadFileTool) Execute(_ context.Context, input json.RawMessage) (tool.ToolResult, error) {
+func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (tool.ToolResult, error) {
 	var in readFileInput
 	if err := json.Unmarshal(input, &in); err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("invalid input: %v", err)}, nil
@@ -92,6 +92,10 @@ func (t *ReadFileTool) Execute(_ context.Context, input json.RawMessage) (tool.T
 		if err := tool.ValidatePathInWorkDir(in.Path, t.WorkDir); err != nil {
 			return tool.ToolResult{Error: err.Error()}, nil
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return tool.ToolResult{Error: err.Error()}, nil
 	}
 
 	ext := strings.ToLower(filepath.Ext(in.Path))

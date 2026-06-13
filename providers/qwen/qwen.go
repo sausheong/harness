@@ -14,6 +14,41 @@ import (
 	"github.com/sausheong/harness/llm"
 )
 
+// pendingTC accumulates a streamed tool call across deltas. args uses
+// strings.Builder so repeated argument fragments append in O(n) total
+// (not O(n²) from string concatenation).
+type pendingTC struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// emitToolCalls sends EventToolCallDone for each completed tool call in
+// ascending index order so tool_use block order is deterministic across
+// turns (prompt-cache stability).
+func emitToolCalls(events chan<- llm.ChatEvent, toolCalls map[int]*pendingTC) {
+	maxIdx := -1
+	for idx := range toolCalls {
+		if idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	for idx := 0; idx <= maxIdx; idx++ {
+		tc, ok := toolCalls[idx]
+		if !ok || tc.name == "" {
+			continue
+		}
+		events <- llm.ChatEvent{
+			Type: llm.EventToolCallDone,
+			ToolCall: &llm.ToolCall{
+				ID:    tc.id,
+				Name:  tc.name,
+				Input: json.RawMessage(tc.args.String()),
+			},
+		}
+	}
+}
+
 // QwenProvider implements llm.LLMProvider using the Qwen Chat Completions API.
 // Qwen uses an OpenAI-compatible API, so we reuse the go-openai client.
 type QwenProvider struct {
@@ -217,11 +252,6 @@ func (p *QwenProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-c
 		defer stream.Close()
 
 		// Track tool calls being built up across deltas
-		type pendingTC struct {
-			id       string
-			name     string
-			argsJSON string
-		}
 		toolCalls := make(map[int]*pendingTC)
 
 		for {
@@ -271,25 +301,14 @@ func (p *QwenProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-c
 						}
 					}
 					if tc.Function.Arguments != "" {
-						pending.argsJSON += tc.Function.Arguments
+						pending.args.WriteString(tc.Function.Arguments)
 					}
 				}
 
 				// Finish reason
 				if choice.FinishReason == openai.FinishReasonToolCalls || choice.FinishReason == openai.FinishReasonStop {
-					// Emit completed tool calls
-					for _, tc := range toolCalls {
-						if tc.name != "" {
-							events <- llm.ChatEvent{
-								Type: llm.EventToolCallDone,
-								ToolCall: &llm.ToolCall{
-									ID:    tc.id,
-									Name:  tc.name,
-									Input: json.RawMessage(tc.argsJSON),
-								},
-							}
-						}
-					}
+					// Emit completed tool calls in index order.
+					emitToolCalls(events, toolCalls)
 				}
 			}
 		}

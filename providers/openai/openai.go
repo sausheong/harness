@@ -271,11 +271,6 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 		defer stream.Close()
 
 		// Track tool calls being built up across deltas
-		type pendingTC struct {
-			id       string
-			name     string
-			argsJSON string
-		}
 		toolCalls := make(map[int]*pendingTC)
 
 		var lastUsage *llm.Usage
@@ -337,25 +332,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 						}
 					}
 					if tc.Function.Arguments != "" {
-						pending.argsJSON += tc.Function.Arguments
+						pending.args.WriteString(tc.Function.Arguments)
 					}
 				}
 
 				// Finish reason
 				if choice.FinishReason == openai.FinishReasonToolCalls || choice.FinishReason == openai.FinishReasonStop {
-					// Emit completed tool calls
-					for _, tc := range toolCalls {
-						if tc.name != "" {
-							events <- llm.ChatEvent{
-								Type: llm.EventToolCallDone,
-								ToolCall: &llm.ToolCall{
-									ID:    tc.id,
-									Name:  tc.name,
-									Input: json.RawMessage(tc.argsJSON),
-								},
-							}
-						}
-					}
+					emitToolCalls(events, toolCalls)
 				}
 			}
 		}
@@ -364,6 +347,42 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 	}()
 
 	return events, nil
+}
+
+// pendingTC accumulates a single streamed tool call across deltas. The
+// streamed tool-call index is the map key in toolCalls; the id, name, and
+// arguments arrive in separate chunks.
+type pendingTC struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// emitToolCalls sends EventToolCallDone for each completed tool call in
+// ascending index order. The map key is the streamed tool-call index;
+// iterating in order keeps the assistant message's tool_use block order
+// deterministic across turns so the prompt cache stays warm.
+func emitToolCalls(events chan<- llm.ChatEvent, toolCalls map[int]*pendingTC) {
+	maxIdx := -1
+	for idx := range toolCalls {
+		if idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	for idx := 0; idx <= maxIdx; idx++ {
+		tc, ok := toolCalls[idx]
+		if !ok || tc.name == "" {
+			continue
+		}
+		events <- llm.ChatEvent{
+			Type: llm.EventToolCallDone,
+			ToolCall: &llm.ToolCall{
+				ID:    tc.id,
+				Name:  tc.name,
+				Input: json.RawMessage(tc.args.String()),
+			},
+		}
+	}
 }
 
 // openaiUnsupportedFields are JSON Schema fields the OpenAI function-
