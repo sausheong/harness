@@ -17,7 +17,9 @@ func TestAddUsage_AccNil(t *testing.T) {
 	got := addUsage(nil, turn)
 	require.NotNil(t, got)
 	assert.Equal(t, llm.Usage{InputTokens: 7, OutputTokens: 3, CacheCreationInputTokens: 2, CacheReadInputTokens: 1}, *got)
-	// input not mutated
+	// input not mutated, and the result must be a distinct pointer (the
+	// non-mutating/aliasing-safety contract the accumulator relies on).
+	assert.NotSame(t, turn, got)
 	assert.Equal(t, 7, turn.InputTokens)
 }
 
