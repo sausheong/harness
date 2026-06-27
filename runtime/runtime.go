@@ -45,7 +45,7 @@ type AgentEvent struct {
 	Result     *tool.ToolResult
 	Error      error
 	Compaction *compaction.Result // populated for EventCompaction* events
-	Usage      *llm.Usage         // populated for EventDone when the provider reported it
+	Usage      *llm.Usage         // on the terminal EventDone, the token total accumulated across all turns of the run (nil if the provider never reported usage); per-turn figures are available via RunTurn's TurnResult.Usage
 }
 
 // Runtime is the agent think-act loop.
@@ -394,6 +394,8 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				"reason", d.Reason)
 		}
 
+		var runUsage *llm.Usage // accumulated across all turns; nil until first reported
+
 		for turn := 0; turn < maxTurns; turn++ {
 			if ctx.Err() != nil {
 				stopReason = "aborted"
@@ -528,7 +530,6 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			}
 
 			var textContent strings.Builder
-			var lastUsage *llm.Usage
 			var toolCalls []llm.ToolCall
 			gotFirstToken := false
 
@@ -587,7 +588,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						refused = event.StopReason == llm.StopReasonRefusal
 						refusalCategory = event.StopCategory
 						if event.Usage != nil {
-							lastUsage = event.Usage
+							runUsage = addUsage(runUsage, event.Usage)
 						}
 						if event.Usage != nil && r.calibrator != nil {
 							// Recompute the estimate on the CURRENT msgs (which may
@@ -713,7 +714,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				}
 				tr.Mark("agent.done", "turn", turn, "reason", "no_tool_calls")
 				stopReason = "completed"
-				r.emit(AgentEvent{Type: EventDone, Usage: lastUsage})
+				r.emit(AgentEvent{Type: EventDone, Usage: runUsage})
 				r.maybeKickoffAsyncCompaction(msgs, parts, toolDefs)
 				return
 			}
