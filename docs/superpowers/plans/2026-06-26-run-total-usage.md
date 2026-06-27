@@ -16,7 +16,6 @@
 - Only `runtime/runtime.go`'s `Run` changes. Do NOT modify `RunTurn` (`runtime/runturn.go`).
 - Sum ALL FOUR `llm.Usage` fields: `InputTokens`, `OutputTokens`, `CacheCreationInputTokens`, `CacheReadInputTokens`.
 - Gates per task: `go build ./...`, `go vet ./...` clean; named tests pass.
-- Commit messages end with `Co-Authored-By: Claude <noreply@anthropic.com>`.
 
 ---
 
@@ -124,9 +123,7 @@ Expected: PASS (4 tests).
 
 ```bash
 git add runtime/usage.go runtime/usage_test.go runtime/runtime.go
-git commit -m "feat(runtime): add pure addUsage helper for field-wise usage summation
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+git commit -m "feat(runtime): add pure addUsage helper for field-wise usage summation"
 ```
 
 (Adjust `git add` to whichever files you actually touched.)
@@ -332,9 +329,7 @@ git commit -m "fix(runtime): emit run-total token usage on terminal EventDone
 
 Run accumulated only the last turn's usage into the terminal EventDone, so
 multi-turn runs under-reported tokens to consumers metering AgentEvent.Usage.
-Sum all four usage fields across turns; RunTurn is unchanged (one turn/call).
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+Sum all four usage fields across turns; RunTurn is unchanged (one turn/call)."
 ```
 
 ---
@@ -376,9 +371,7 @@ Expected: clean.
 
 ```bash
 git add runtime/runtime.go developer.md
-git commit -m "docs(runtime): clarify EventDone.Usage is the run total
-
-Co-Authored-By: Claude <noreply@anthropic.com>"
+git commit -m "docs(runtime): clarify EventDone.Usage is the run total"
 ```
 
 (Drop `developer.md` from the add if you didn't change it.)
