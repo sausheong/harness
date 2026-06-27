@@ -45,7 +45,7 @@ type AgentEvent struct {
 	Result     *tool.ToolResult
 	Error      error
 	Compaction *compaction.Result // populated for EventCompaction* events
-	Usage      *llm.Usage         // populated for EventDone when the provider reported it
+	Usage      *llm.Usage         // on the terminal EventDone, the token total accumulated across all turns of the run (nil if the provider never reported usage); per-turn figures are available via RunTurn's TurnResult.Usage
 }
 
 // Runtime is the agent think-act loop.
