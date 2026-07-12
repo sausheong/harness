@@ -335,8 +335,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 // mid-flight; the partial output of the failed stream is discarded so
 // the prompt cache prefix on the next turn stays byte-identical.
 //
-// Note: thinking blocks (when reasoning is enabled) are NOT surfaced —
-// matches the streaming path which also doesn't emit thinking deltas.
+// Thinking blocks are surfaced as EventThinkingBlock events so the runtime
+// can store and echo them back in subsequent turns.
 // Tool-use input is converted to JSON via the SDK's RawJSON field.
 func (p *AnthropicProvider) ChatNonStreaming(ctx context.Context, req llm.ChatRequest) (<-chan llm.ChatEvent, error) {
 	params := p.buildMessageParams(req)
@@ -350,6 +350,16 @@ func (p *AnthropicProvider) ChatNonStreaming(ctx context.Context, req llm.ChatRe
 		defer close(events)
 		for _, block := range msg.Content {
 			switch block.Type {
+			case "thinking":
+				if block.Thinking != "" || block.Signature != "" {
+					events <- llm.ChatEvent{
+						Type: llm.EventThinkingBlock,
+						ThinkingBlock: &llm.ThinkingBlock{
+							Thinking:  block.Thinking,
+							Signature: block.Signature,
+						},
+					}
+				}
 			case "text":
 				if block.Text != "" {
 					events <- llm.ChatEvent{Type: llm.EventTextDelta, Text: block.Text}
