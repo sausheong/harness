@@ -531,6 +531,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 
 			var textContent strings.Builder
 			var toolCalls []llm.ToolCall
+			var thinkingBlocks []session.ThinkingBlockData
 			gotFirstToken := false
 
 			streamingOn := r.streamingToolsEnabled()
@@ -561,6 +562,14 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							tr.Mark("llm.first_token", "turn", turn, "ttft_ms", time.Since(llmStart).Milliseconds(), "kind", "tool_call")
 						}
 						r.emit(AgentEvent{Type: EventToolCallStart, ToolCall: event.ToolCall})
+
+					case llm.EventThinkingBlock:
+						if event.ThinkingBlock != nil {
+							thinkingBlocks = append(thinkingBlocks, session.ThinkingBlockData{
+								Thinking:  event.ThinkingBlock.Thinking,
+								Signature: event.ThinkingBlock.Signature,
+							})
+						}
 
 					case llm.EventToolCallDone:
 						if event.ToolCall == nil {
@@ -696,8 +705,13 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				"text_chars", textContent.Len(),
 				"tool_calls", len(toolCalls))
 
-			if textContent.Len() > 0 {
-				r.Session.Append(session.AssistantMessageEntry(textContent.String()))
+			if textContent.Len() > 0 || len(thinkingBlocks) > 0 {
+				if len(thinkingBlocks) > 0 {
+					r.Session.Append(session.AssistantMessageEntryWithThinking(textContent.String(), thinkingBlocks))
+				} else {
+					r.Session.Append(session.AssistantMessageEntry(textContent.String()))
+				}
+				thinkingBlocks = nil
 				if r.KG != nil {
 					r.kgMu.Lock()
 					thread = append(thread, Message{

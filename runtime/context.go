@@ -212,6 +212,15 @@ func assembleMessages(history []session.SessionEntry) []llm.Message {
 				Role:    entry.Role,
 				Content: md.Text,
 			}
+			// Restore thinking blocks for assistant messages (must be echoed back).
+			if entry.Role == "assistant" {
+				for _, tb := range md.ThinkingBlocks {
+					msg.ThinkingBlocks = append(msg.ThinkingBlocks, llm.ThinkingBlock{
+						Thinking:  tb.Thinking,
+						Signature: tb.Signature,
+					})
+				}
+			}
 			// Convert session images to LLM image content
 			if entry.Role == "user" {
 				for _, img := range md.Images {

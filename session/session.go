@@ -36,10 +36,18 @@ type ImageData struct {
 	Data     string `json:"data"` // base64-encoded
 }
 
+// ThinkingBlockData stores a thinking block from a model response.
+// It must be echoed back verbatim in subsequent turns.
+type ThinkingBlockData struct {
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature,omitempty"`
+}
+
 // MessageData holds text message content.
 type MessageData struct {
-	Text   string      `json:"text"`
-	Images []ImageData `json:"images,omitempty"`
+	Text           string              `json:"text"`
+	Images         []ImageData         `json:"images,omitempty"`
+	ThinkingBlocks []ThinkingBlockData `json:"thinking_blocks,omitempty"`
 }
 
 // ToolCallData holds a tool call's details.
@@ -331,6 +339,17 @@ func UserMessageWithImagesEntry(text string, images []ImageData) SessionEntry {
 // AssistantMessageEntry creates an assistant message entry.
 func AssistantMessageEntry(text string) SessionEntry {
 	data, _ := json.Marshal(MessageData{Text: text})
+	return SessionEntry{
+		Type: EntryTypeMessage,
+		Role: "assistant",
+		Data: data,
+	}
+}
+
+// AssistantMessageEntryWithThinking creates an assistant message entry that
+// includes thinking blocks which must be echoed back in subsequent turns.
+func AssistantMessageEntryWithThinking(text string, blocks []ThinkingBlockData) SessionEntry {
+	data, _ := json.Marshal(MessageData{Text: text, ThinkingBlocks: blocks})
 	return SessionEntry{
 		Type: EntryTypeMessage,
 		Role: "assistant",

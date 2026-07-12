@@ -171,6 +171,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 		var pendingTools []pendingTC
 		var currentBlockType string
 		var inputTokens, cacheCreationTokens, cacheReadTokens int64
+		var pendingThinking strings.Builder
+		var pendingThinkingSignature string
 
 		for stream.Next() {
 			event := stream.Current()
@@ -187,6 +189,10 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 				switch cb.Type {
 				case "text":
 					currentBlockType = "text"
+				case "thinking":
+					currentBlockType = "thinking"
+					pendingThinking.Reset()
+					pendingThinkingSignature = ""
 				case "tool_use":
 					currentBlockType = "tool_use"
 					pending := pendingTC{
@@ -219,6 +225,10 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 						Type: llm.EventTextDelta,
 						Text: delta.Text,
 					}
+				case "thinking_delta":
+					pendingThinking.WriteString(delta.Thinking)
+				case "signature_delta":
+					pendingThinkingSignature += delta.Signature
 				case "input_json_delta":
 					if len(pendingTools) > 0 {
 						pendingTools[len(pendingTools)-1].inputJSON.WriteString(delta.PartialJSON)
@@ -226,6 +236,17 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 				}
 
 			case "content_block_stop":
+				if currentBlockType == "thinking" {
+					events <- llm.ChatEvent{
+						Type: llm.EventThinkingBlock,
+						ThinkingBlock: &llm.ThinkingBlock{
+							Thinking:  pendingThinking.String(),
+							Signature: pendingThinkingSignature,
+						},
+					}
+					pendingThinking.Reset()
+					pendingThinkingSignature = ""
+				}
 				if currentBlockType == "tool_use" && len(pendingTools) > 0 {
 					// Index in place rather than copying the element: the
 					// pendingTC holds a strings.Builder, which must not be
@@ -513,6 +534,16 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 			}
 		case "assistant":
 			var blocks []anthropic.ContentBlockParamUnion
+			// Thinking blocks must come first, before text and tool_use.
+			for _, tb := range m.ThinkingBlocks {
+				blocks = append(blocks, anthropic.ContentBlockParamUnion{
+					OfThinking: &anthropic.ThinkingBlockParam{
+						Type:      "thinking",
+						Thinking:  tb.Thinking,
+						Signature: tb.Signature,
+					},
+				})
+			}
 			if m.Content != "" {
 				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
 			}

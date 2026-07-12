@@ -112,6 +112,7 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 
 	var textContent strings.Builder
 	var toolCalls []llm.ToolCall
+	var thinkingBlocks []session.ThinkingBlockData
 	var lastUsage *llm.Usage
 	retriedRefusal := false
 streamLoop:
@@ -125,6 +126,13 @@ streamLoop:
 				emit(AgentEvent{Type: EventTextDelta, Text: event.Text})
 			case llm.EventToolCallStart:
 				emit(AgentEvent{Type: EventToolCallStart, ToolCall: event.ToolCall})
+			case llm.EventThinkingBlock:
+				if event.ThinkingBlock != nil {
+					thinkingBlocks = append(thinkingBlocks, session.ThinkingBlockData{
+						Thinking:  event.ThinkingBlock.Thinking,
+						Signature: event.ThinkingBlock.Signature,
+					})
+				}
 			case llm.EventToolCallDone:
 				if event.ToolCall != nil {
 					toolCalls = append(toolCalls, *event.ToolCall)
@@ -170,8 +178,12 @@ streamLoop:
 		break streamLoop
 	}
 
-	if textContent.Len() > 0 {
-		r.Session.Append(session.AssistantMessageEntry(textContent.String()))
+	if textContent.Len() > 0 || len(thinkingBlocks) > 0 {
+		if len(thinkingBlocks) > 0 {
+			r.Session.Append(session.AssistantMessageEntryWithThinking(textContent.String(), thinkingBlocks))
+		} else {
+			r.Session.Append(session.AssistantMessageEntry(textContent.String()))
+		}
 	}
 
 	if len(toolCalls) == 0 {

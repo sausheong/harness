@@ -17,6 +17,9 @@ const (
 	EventToolCallDone
 	EventDone
 	EventError
+	// EventThinkingBlock is emitted when the model returns an extended-thinking
+	// block. The runtime must echo these back in subsequent turns verbatim.
+	EventThinkingBlock
 )
 
 // ImageContent holds image data for multimodal messages.
@@ -26,13 +29,23 @@ type ImageContent struct {
 }
 
 // Message represents a conversation message.
+// ThinkingBlock holds an opaque thinking/reasoning block returned by models
+// that support extended thinking (e.g. Anthropic with thinking enabled,
+// DeepSeek-v4-pro). The Signature field is the provider-supplied integrity
+// token that must be echoed back verbatim in subsequent turns.
+type ThinkingBlock struct {
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature,omitempty"`
+}
+
 type Message struct {
-	Role       string         `json:"role"` // "user", "assistant", "system"
-	Content    string         `json:"content,omitempty"`
-	Images     []ImageContent `json:"-"`                      // image attachments (not serialized)
-	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"` // for tool results
-	IsError    bool           `json:"is_error,omitempty"`     // for tool results
+	Role           string          `json:"role"` // "user", "assistant", "system"
+	Content        string          `json:"content,omitempty"`
+	Images         []ImageContent  `json:"-"`                        // image attachments (not serialized)
+	ToolCalls      []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID     string          `json:"tool_call_id,omitempty"`   // for tool results
+	IsError        bool            `json:"is_error,omitempty"`       // for tool results
+	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"` // echoed back for thinking-mode models
 }
 
 // ToolCall represents a tool invocation requested by the LLM.
@@ -130,11 +143,12 @@ type Usage struct {
 
 // ChatEvent is a single streaming event from the LLM.
 type ChatEvent struct {
-	Type     EventType
-	Text     string
-	ToolCall *ToolCall
-	Usage    *Usage
-	Error    error
+	Type         EventType
+	Text         string
+	ToolCall     *ToolCall
+	ThinkingBlock *ThinkingBlock // populated on EventThinkingBlock
+	Usage        *Usage
+	Error        error
 	// StopReason carries the provider's terminal stop reason on EventDone
 	// ("end_turn", "tool_use", "max_tokens", "refusal", ...). Empty when
 	// the provider doesn't report one. StopReasonRefusal is the value the
