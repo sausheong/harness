@@ -93,6 +93,11 @@ func stripCacheKey(tools []ToolDef, fields []string) string {
 		h.Write([]byte(t.Name))
 		h.Write([]byte("\x02"))
 		h.Write(t.Parameters)
+		if t.CacheControl != nil {
+			h.Write([]byte(t.CacheControl.Type))
+			h.Write([]byte("\x04"))
+			h.Write([]byte(t.CacheControl.TTL))
+		}
 		h.Write([]byte("\x03"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -104,6 +109,12 @@ func cloneToolDefs(in []ToolDef) []ToolDef {
 	}
 	out := make([]ToolDef, len(in))
 	copy(out, in)
+	for i := range out {
+		if in[i].CacheControl != nil {
+			cache := *in[i].CacheControl
+			out[i].CacheControl = &cache
+		}
+	}
 	return out
 }
 

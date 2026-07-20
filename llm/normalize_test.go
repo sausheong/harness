@@ -118,3 +118,16 @@ func TestStripFieldsMalformedSchema(t *testing.T) {
 	assert.Equal(t, bad, out)
 	assert.Empty(t, diags)
 }
+
+func TestStripCacheKeyIncludesCacheControl(t *testing.T) {
+	base := ToolDef{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}
+	fiveMinutes := base
+	fiveMinutes.CacheControl = &CacheControl{Type: "ephemeral", TTL: "5m"}
+	oneHour := base
+	oneHour.CacheControl = &CacheControl{Type: "ephemeral", TTL: "1h"}
+	assert.NotEqual(t, stripCacheKey([]ToolDef{fiveMinutes}, nil), stripCacheKey([]ToolDef{oneHour}, nil))
+
+	cloned := cloneToolDefs([]ToolDef{oneHour})
+	cloned[0].CacheControl.TTL = "5m"
+	assert.Equal(t, "1h", oneHour.CacheControl.TTL, "cached normalization results must not alias cache metadata")
+}

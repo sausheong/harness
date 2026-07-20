@@ -61,16 +61,18 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 			props = schema.Properties
 			required = schema.Required
 		}
-		tools = append(tools, anthropic.ToolUnionParam{
-			OfTool: &anthropic.ToolParam{
-				Name:        t.Name,
-				Description: anthropic.String(t.Description),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Properties: props,
-					Required:   required,
-				},
+		tool := anthropic.ToolParam{
+			Name:        t.Name,
+			Description: anthropic.String(t.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: props,
+				Required:   required,
 			},
-		})
+		}
+		if cacheRequested(t.CacheControl) {
+			tool.CacheControl = anthropicCacheControl(t.CacheControl)
+		}
+		tools = append(tools, anthropic.ToolUnionParam{OfTool: &tool})
 	}
 
 	maxTokens := int64(req.MaxTokens)
@@ -86,6 +88,9 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
 		Messages:  msgs,
+	}
+	if cacheRequested(req.CacheControl) {
+		params.CacheControl = anthropicCacheControl(req.CacheControl)
 	}
 	if len(tools) > 0 {
 		params.Tools = tools
@@ -526,7 +531,11 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 						i-- // un-consume; outer loop will re-process
 						break
 					}
-					blocks = append(blocks, buildToolResultBlock(cur))
+					block := buildToolResultBlock(cur)
+					if cacheRequested(cur.CacheControl) {
+						setCacheControlOnBlock(&block, cur.CacheControl)
+					}
+					blocks = append(blocks, block)
 				}
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
 			} else if len(m.Images) > 0 {
@@ -538,9 +547,16 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 				if m.Content != "" {
 					blocks = append(blocks, anthropic.NewTextBlock(m.Content))
 				}
+				if cacheRequested(m.CacheControl) && len(blocks) > 0 {
+					setCacheControlOnBlock(&blocks[len(blocks)-1], m.CacheControl)
+				}
 				msgs = append(msgs, anthropic.NewUserMessage(blocks...))
 			} else {
-				msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+				block := anthropic.NewTextBlock(m.Content)
+				if cacheRequested(m.CacheControl) {
+					setCacheControlOnBlock(&block, m.CacheControl)
+				}
+				msgs = append(msgs, anthropic.NewUserMessage(block))
 			}
 		case "assistant":
 			var blocks []anthropic.ContentBlockParamUnion
@@ -565,6 +581,9 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
 			}
 			if len(blocks) > 0 {
+				if cacheRequested(m.CacheControl) {
+					setCacheControlOnBlock(&blocks[len(blocks)-1], m.CacheControl)
+				}
 				msgs = append(msgs, anthropic.NewAssistantMessage(blocks...))
 			}
 		}
@@ -575,7 +594,7 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 	if cacheLast && len(msgs) > 0 {
 		tail := &msgs[len(msgs)-1]
 		if len(tail.Content) > 0 {
-			setCacheControlOnBlock(&tail.Content[len(tail.Content)-1])
+			setCacheControlOnBlock(&tail.Content[len(tail.Content)-1], nil)
 		}
 	}
 	return msgs
@@ -587,8 +606,8 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 // so we mutate the variant struct directly. Variants other than text /
 // tool_result / image / tool_use are out of scope; the runtime never
 // produces them as the tail of a user message.
-func setCacheControlOnBlock(block *anthropic.ContentBlockParamUnion) {
-	cc := anthropic.NewCacheControlEphemeralParam()
+func setCacheControlOnBlock(block *anthropic.ContentBlockParamUnion, cache *llm.CacheControl) {
+	cc := anthropicCacheControl(cache)
 	switch {
 	case block.OfText != nil:
 		block.OfText.CacheControl = cc
@@ -650,8 +669,8 @@ func buildAnthropicSystem(req llm.ChatRequest) []anthropic.TextBlockParam {
 				continue
 			}
 			b := anthropic.TextBlockParam{Text: p.Text}
-			if p.Cache {
-				b.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			if p.Cache || cacheRequested(p.CacheControl) {
+				b.CacheControl = anthropicCacheControl(p.CacheControl)
 			}
 			blocks = append(blocks, b)
 		}
@@ -664,4 +683,16 @@ func buildAnthropicSystem(req llm.ChatRequest) []anthropic.TextBlockParam {
 		return []anthropic.TextBlockParam{{Text: req.SystemPrompt}}
 	}
 	return nil
+}
+
+func cacheRequested(cache *llm.CacheControl) bool {
+	return cache != nil && (cache.Type == "" || cache.Type == "ephemeral")
+}
+
+func anthropicCacheControl(cache *llm.CacheControl) anthropic.CacheControlEphemeralParam {
+	cc := anthropic.NewCacheControlEphemeralParam()
+	if cache != nil && cache.TTL != "" {
+		cc.TTL = anthropic.CacheControlEphemeralTTL(cache.TTL)
+	}
+	return cc
 }

@@ -41,11 +41,14 @@ type ThinkingBlock struct {
 type Message struct {
 	Role           string          `json:"role"` // "user", "assistant", "system"
 	Content        string          `json:"content,omitempty"`
-	Images         []ImageContent  `json:"-"`                        // image attachments (not serialized)
+	Images         []ImageContent  `json:"-"` // image attachments (not serialized)
 	ToolCalls      []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID     string          `json:"tool_call_id,omitempty"`   // for tool results
-	IsError        bool            `json:"is_error,omitempty"`       // for tool results
+	ToolCallID     string          `json:"tool_call_id,omitempty"`    // for tool results
+	IsError        bool            `json:"is_error,omitempty"`        // for tool results
 	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"` // echoed back for thinking-mode models
+	// CacheControl requests a cache breakpoint on the final cacheable block of
+	// this logical message. Nil means no explicit breakpoint.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // ToolCall represents a tool invocation requested by the LLM.
@@ -57,9 +60,17 @@ type ToolCall struct {
 
 // ToolDef defines a tool for the LLM.
 type ToolDef struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	Parameters   json.RawMessage `json:"parameters"` // JSON Schema
+	CacheControl *CacheControl   `json:"cache_control,omitempty"`
+}
+
+// CacheControl is provider-neutral prompt-cache metadata. Type is currently
+// "ephemeral"; TTL is empty/"5m" or "1h".
+type CacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 // Diagnostic describes a single normalization or clamping event emitted
@@ -79,7 +90,8 @@ type SystemPromptPart struct {
 	Text string
 	// Cache requests that the prefix up to and including this part be cached.
 	// Anthropic-only; ignored elsewhere.
-	Cache bool
+	Cache        bool
+	CacheControl *CacheControl
 }
 
 // ReasoningMode is the unified reasoning/thinking knob across providers.
@@ -130,7 +142,11 @@ type ChatRequest struct {
 	// CacheLastMessage requests that the final block of the final user
 	// message also be cache-marked. Anthropic-only; ignored elsewhere.
 	CacheLastMessage bool
-	Reasoning        ReasoningMode // zero value = ReasoningOff; safe default
+	// CacheControl enables provider-level automatic prompt caching.
+	CacheControl *CacheControl
+	// SessionID is routing metadata only and is not sent to providers.
+	SessionID string
+	Reasoning ReasoningMode // zero value = ReasoningOff; safe default
 }
 
 // Usage tracks token usage.
@@ -143,12 +159,12 @@ type Usage struct {
 
 // ChatEvent is a single streaming event from the LLM.
 type ChatEvent struct {
-	Type         EventType
-	Text         string
-	ToolCall     *ToolCall
+	Type          EventType
+	Text          string
+	ToolCall      *ToolCall
 	ThinkingBlock *ThinkingBlock // populated on EventThinkingBlock
-	Usage        *Usage
-	Error        error
+	Usage         *Usage
+	Error         error
 	// StopReason carries the provider's terminal stop reason on EventDone
 	// ("end_turn", "tool_use", "max_tokens", "refusal", ...). Empty when
 	// the provider doesn't report one. StopReasonRefusal is the value the

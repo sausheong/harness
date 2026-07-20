@@ -10,9 +10,9 @@ import (
 	"testing"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/sausheong/harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/sausheong/harness/llm"
 )
 
 // helper: extract tool_use IDs (in order) from an assistant MessageParam.
@@ -233,6 +233,65 @@ func TestAnthropicSystemPromptPartsEmitCacheControl(t *testing.T) {
 	require.Equal(t, "ephemeral", string(got[0].CacheControl.Type))
 	require.Equal(t, "dynamic", got[1].Text)
 	require.Empty(t, string(got[1].CacheControl.Type), "second block must not be cache-marked")
+}
+
+func TestAnthropicCacheControlPreservesTTLAtEveryWireLocation(t *testing.T) {
+	cache1h := &llm.CacheControl{Type: "ephemeral", TTL: "1h"}
+	p := NewAnthropicProvider("test-key", "")
+	params := p.buildMessageParams(llm.ChatRequest{
+		Model:        "claude-test",
+		MaxTokens:    10,
+		CacheControl: cache1h,
+		SystemPromptParts: []llm.SystemPromptPart{
+			{Text: "stable system", CacheControl: cache1h},
+		},
+		Tools: []llm.ToolDef{{
+			Name: "lookup", Parameters: json.RawMessage(`{"type":"object","properties":{}}`), CacheControl: cache1h,
+		}},
+		Messages: []llm.Message{{Role: "user", Content: "hello", CacheControl: cache1h}},
+	})
+
+	require.Equal(t, "ephemeral", string(params.CacheControl.Type))
+	require.Equal(t, "1h", string(params.CacheControl.TTL))
+	require.Len(t, params.System, 1)
+	require.Equal(t, "1h", string(params.System[0].CacheControl.TTL))
+	require.Len(t, params.Tools, 1)
+	require.NotNil(t, params.Tools[0].OfTool)
+	require.Equal(t, "1h", string(params.Tools[0].OfTool.CacheControl.TTL))
+	require.Len(t, params.Messages, 1)
+	messageCache := params.Messages[0].Content[0].GetCacheControl()
+	require.NotNil(t, messageCache)
+	require.Equal(t, "1h", string(messageCache.TTL))
+}
+
+func TestAnthropicCacheControlAppearsOnActualHTTPRequest(t *testing.T) {
+	bodyCh := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodyCh <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	cache := &llm.CacheControl{Type: "ephemeral", TTL: "1h"}
+	p := NewAnthropicProvider("test-key", srv.URL)
+	events, err := p.ChatStream(context.Background(), llm.ChatRequest{
+		Model: "claude-test", MaxTokens: 10, CacheControl: cache,
+		SystemPromptParts: []llm.SystemPromptPart{{Text: "system", CacheControl: cache}},
+		Tools:             []llm.ToolDef{{Name: "lookup", Parameters: json.RawMessage(`{"type":"object","properties":{}}`), CacheControl: cache}},
+		Messages:          []llm.Message{{Role: "user", Content: "hello", CacheControl: cache}},
+	})
+	require.NoError(t, err)
+	for range events {
+	}
+	body := <-bodyCh
+	require.Equal(t, "1h", body["cache_control"].(map[string]any)["ttl"])
+	require.Equal(t, "1h", body["system"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)["ttl"])
+	require.Equal(t, "1h", body["tools"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)["ttl"])
+	message := body["messages"].([]any)[0].(map[string]any)
+	require.Equal(t, "1h", message["content"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)["ttl"])
 }
 
 func TestAnthropicSystemPromptStringFallback(t *testing.T) {
@@ -544,7 +603,7 @@ func TestAdaptiveThinkingModels_EmitAdaptiveNotEnabled(t *testing.T) {
 	p := NewAnthropicProvider("test-key", "")
 	models := []string{
 		"claude-fable-5",
-		"claude-fable-5-global",   // LiteLLM / gateway model-group names
+		"claude-fable-5-global", // LiteLLM / gateway model-group names
 		"claude-mythos-5",
 		"claude-opus-4-7",
 		"claude-opus-4-8",
