@@ -469,6 +469,8 @@ func anthropicAdaptiveThinkingOnly(model string) bool {
 		"claude-opus-4-7",
 		"claude-opus-4-8",
 		"claude-opus-4-9", // future-proof within the 4.x line
+		"claude-opus-5",
+		"claude-sonnet-5",
 	}
 	for _, marker := range adaptiveOnly {
 		if strings.Contains(model, marker) {
