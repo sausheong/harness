@@ -102,12 +102,10 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
 	if anthropicAdaptiveThinkingOnly(model) {
-		// Fable 5 / Mythos 5 / Opus 4.7+ reject the legacy
-		// enabled+budget_tokens config (400 "thinking.type.enabled is
-		// not supported"). They take {type:"adaptive"} plus
+		// Fable 5 / Mythos 5 / Opus 4.7+ / Opus 5 / Sonnet 5 reject the
+		// legacy enabled+budget_tokens config (400 "thinking.type.enabled
+		// is not supported"). They take {type:"adaptive"} plus
 		// output_config.effort; sampling params are also removed.
-		// Reasoning off → omit thinking entirely (Fable 5 rejects an
-		// explicit {type:"disabled"} too).
 		if req.Reasoning != llm.ReasoningOff {
 			params.Thinking = anthropic.ThinkingConfigParamUnion{
 				OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
@@ -118,7 +116,22 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 			slog.Info("anthropic adaptive thinking",
 				"model", model,
 				"effort", string(anthropicEffort(req.Reasoning)))
+		} else if anthropicThinksByDefault(model) {
+			// Opus 5 and Sonnet 5 think by default when the thinking
+			// param is omitted entirely (unlike Opus 4.7/4.8, Fable 5,
+			// and Mythos, where omitting it means no thinking) — so
+			// expressing "reasoning off" here requires an explicit
+			// {type:"disabled"}. Accepted at effort high or below;
+			// our ReasoningMode never asks for more than high.
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+			}
 		}
+		// Else (Fable 5 / Mythos / Opus 4.7/4.8, reasoning off): omit
+		// thinking entirely. Fable 5 and Mythos reject an explicit
+		// {type:"disabled"} at any effort; Opus 4.7/4.8 already default
+		// to no thinking when the param is omitted, so there's nothing
+		// to disable.
 	} else if cfg, ok := p.BuildThinkingConfig(model, req.Reasoning); ok {
 		required := cfg.BudgetTokens + 4096
 		if maxTokens < required {
@@ -456,11 +469,12 @@ func (p *AnthropicProvider) BuildThinkingConfig(model string, mode llm.Reasoning
 }
 
 // anthropicAdaptiveThinkingOnly reports whether the model accepts ONLY
-// adaptive thinking: Claude Fable 5, Claude Mythos 5, and Opus 4.7+.
-// On these the legacy {type:"enabled", budget_tokens:N} config and
-// sampling params (temperature/top_p/top_k) return HTTP 400. Matched by
-// substring so gateway model-group names (claude-fable-5-global) and
-// Bedrock-style IDs (us.anthropic.claude-opus-4-8-v1) are covered.
+// adaptive thinking: Claude Fable 5, Claude Mythos 5, Opus 4.7+, Opus 5,
+// and Sonnet 5. On these the legacy {type:"enabled", budget_tokens:N}
+// config and sampling params (temperature/top_p/top_k) return HTTP 400.
+// Matched by substring so gateway model-group names
+// (claude-fable-5-global) and Bedrock-style IDs
+// (us.anthropic.claude-opus-4-8-v1) are covered.
 func anthropicAdaptiveThinkingOnly(model string) bool {
 	adaptiveOnly := []string{
 		"claude-fable-5",
@@ -469,8 +483,29 @@ func anthropicAdaptiveThinkingOnly(model string) bool {
 		"claude-opus-4-7",
 		"claude-opus-4-8",
 		"claude-opus-4-9", // future-proof within the 4.x line
+		"claude-opus-5",
+		"claude-sonnet-5",
 	}
 	for _, marker := range adaptiveOnly {
+		if strings.Contains(model, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicThinksByDefault reports whether the model runs adaptive
+// thinking when the thinking param is omitted entirely — true for Opus 5
+// and Sonnet 5 only. Fable 5, Mythos, and Opus 4.7/4.8 do NOT think by
+// default (omitting thinking means no thinking on those), so expressing
+// "reasoning off" there is a no-op omission; on Opus 5 / Sonnet 5 it
+// requires an explicit {type:"disabled"} or the model thinks anyway.
+func anthropicThinksByDefault(model string) bool {
+	thinksByDefault := []string{
+		"claude-opus-5",
+		"claude-sonnet-5",
+	}
+	for _, marker := range thinksByDefault {
 		if strings.Contains(model, marker) {
 			return true
 		}

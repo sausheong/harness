@@ -2,10 +2,15 @@ package gemini
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/genai"
 	"github.com/sausheong/harness/llm"
@@ -213,9 +218,25 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 						if err != nil {
 							argsJSON = []byte("{}")
 						}
+						// Gemini's FunctionCall.ID is optional and is
+						// frequently empty (single, non-parallel calls
+						// commonly omit it). Falling back to fc.Name is
+						// wrong on two counts: it isn't a valid
+						// provider-neutral tool-call ID shape, and it
+						// isn't unique — two calls to the same tool in
+						// one turn, or the same tool called again later
+						// in the conversation (routine for a coding
+						// agent re-reading files), collide on the same
+						// ID. When that history is later replayed to
+						// Anthropic on a routing switch, duplicate
+						// tool_use ids across the conversation are
+						// rejected with a 400. Mint a synthetic
+						// toolu_-shaped ID instead, matching Anthropic's
+						// own ID shape so a later replay to Anthropic
+						// looks like any other tool_use id.
 						id := fc.ID
 						if id == "" {
-							id = fc.Name
+							id = syntheticToolCallID()
 						}
 						events <- llm.ChatEvent{
 							Type: llm.EventToolCallStart,
@@ -249,6 +270,24 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 // emit a single EventDone at stream end (mirrors the OpenAI provider's lastUsage).
 func updateUsage(_ *llm.Usage, prompt, candidates int) *llm.Usage {
 	return &llm.Usage{InputTokens: prompt, OutputTokens: candidates}
+}
+
+// syntheticToolCallID mints a unique, Anthropic-shaped tool-call ID
+// ("toolu_" + 16 hex chars) for Gemini function calls that arrive with
+// no ID of their own. Uniqueness (not just shape) is the point: a
+// name-based fallback collides whenever the same tool is called more
+// than once in a conversation, which produces duplicate tool_use ids if
+// that history is later replayed to Anthropic. Falls back to a
+// time+PID-derived suffix if crypto/rand is unavailable — still unique
+// within one process lifetime, which is all a single conversation needs.
+func syntheticToolCallID() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err == nil {
+		return "toolu_" + hex.EncodeToString(b)
+	}
+	mix := uint64(time.Now().UnixNano()) ^ uint64(os.Getpid())
+	binary.BigEndian.PutUint64(b, mix)
+	return "toolu_" + hex.EncodeToString(b)
 }
 
 // geminiUnsupportedFields are JSON Schema fields Gemini's "OpenAPI 3.0
