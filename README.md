@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.3.4.** Latest tagged release. The `runtime` API
+> **Status: v0.3.5.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -376,12 +376,12 @@ a real failure.
 
 ## Status
 
-`v0.3.4` is the latest tagged release. The v0.x line follows Go
+`v0.3.5` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.3.4
+go get github.com/sausheong/harness@v0.3.5
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
