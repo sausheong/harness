@@ -48,6 +48,30 @@ func TestReadFileToolWorkDirClamps(t *testing.T) {
 		"reads outside the workspace must be rejected when WorkDir is set")
 }
 
+func TestReadFileToolWorkDirRejectsEscapingFileSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("nope"), 0o644))
+	link := filepath.Join(workspace, "secret-link")
+	require.NoError(t, os.Symlink(outside, link))
+
+	readTool := &ReadFileTool{WorkDir: workspace}
+	input, _ := json.Marshal(readFileInput{Path: link})
+	result, err := readTool.Execute(context.Background(), input)
+	require.NoError(t, err)
+	assert.Contains(t, result.Error, "outside workspace")
+	assert.Empty(t, result.Output)
+
+	writeTool := &WriteFileTool{WorkDir: workspace}
+	writeInput, _ := json.Marshal(writeFileInput{Path: link, Content: "overwritten"})
+	result, err = writeTool.Execute(context.Background(), writeInput)
+	require.NoError(t, err)
+	assert.Contains(t, result.Error, "outside workspace")
+	data, readErr := os.ReadFile(outside)
+	require.NoError(t, readErr)
+	assert.Equal(t, "nope", string(data))
+}
+
 func TestWriteFileTool(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "subdir", "output.txt")

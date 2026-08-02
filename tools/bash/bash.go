@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
 	"github.com/sausheong/harness/tool"
 )
 
@@ -57,8 +58,7 @@ func resolveBashCommandPaths(cmd string) (string, [][2]string) {
 	return out, subs
 }
 
-// shellSingleQuote wraps s in single quotes, escaping any embedded single
-// quotes via the standard '\'' dance.
+// shellSingleQuote wraps s in single quotes, safely escaping embedded quotes.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -83,7 +83,7 @@ const defaultBashTimeout = 120 * time.Second
 
 // ExecPolicy controls which commands the bash tool is allowed to execute.
 type ExecPolicy struct {
-	Level     string   // "deny", "allowlist", "full"
+	Level     string   // "deny", "allowlist", "full"; any other value denies execution
 	Allowlist []string // command basenames allowed when Level is "allowlist"
 }
 
@@ -214,8 +214,11 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tool.Too
 					return tool.ToolResult{Error: fmt.Sprintf("command %q is not in the exec allowlist", cmd)}, nil
 				}
 			}
+		case "full":
+			// Explicitly unrestricted.
+		default:
+			return tool.ToolResult{Error: fmt.Sprintf("invalid bash execution policy %q; execution denied", t.ExecPolicy.Level)}, nil
 		}
-		// "full" or unrecognized: allow everything
 	}
 
 	timeout := defaultBashTimeout

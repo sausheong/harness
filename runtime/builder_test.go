@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"testing"
 
 	"github.com/sausheong/harness/tool"
@@ -36,6 +37,39 @@ func TestBuildRuntimeMinimalSpecSafe(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "anthropic", rt.Provider)
 	require.NotEmpty(t, rt.StaticSystemPrompt)
+}
+
+func TestBuildRuntimeMergesSpecLoopOverSharedDefaults(t *testing.T) {
+	baseCalled := false
+	specCalled := false
+	baseStop := func(context.Context, string) { baseCalled = true }
+	specStop := func(context.Context, string) { specCalled = true }
+	rt, err := BuildRuntime(
+		RuntimeDeps{AgentLoop: LoopConfig{
+			MaxToolConcurrency: 3,
+			MaxAgentDepth:      2,
+			MaxToolResultLen:   8000,
+			Hooks:              LifecycleHooks{OnStop: baseStop},
+		}},
+		RuntimeInputs{},
+		AgentSpec{
+			ID: "a", Name: "A", Model: "anthropic/claude-sonnet-4-5",
+			Loop: LoopConfig{
+				MaxToolConcurrency: 7,
+				StreamingTools:     true,
+				Hooks:              LifecycleHooks{OnStop: specStop},
+			},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 7, rt.AgentLoop.MaxToolConcurrency)
+	assert.Equal(t, 2, rt.AgentLoop.MaxAgentDepth, "zero spec fields inherit shared defaults")
+	assert.Equal(t, 8000, rt.AgentLoop.MaxToolResultLen)
+	assert.True(t, rt.AgentLoop.StreamingTools)
+	require.NotNil(t, rt.AgentLoop.Hooks.OnStop)
+	rt.AgentLoop.Hooks.OnStop(context.Background(), "completed")
+	assert.False(t, baseCalled)
+	assert.True(t, specCalled)
 }
 
 func TestBuildRuntimeUsesCallerProvidedMemoryFiles(t *testing.T) {

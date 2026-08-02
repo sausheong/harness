@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.1.0.** First tagged release. The `runtime` API
+> **Status: v0.3.4.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -229,6 +229,9 @@ them via `LoopConfig`:
 
 `LoopConfig` field values win over env vars when set. Set the field
 to its zero value (or omit it) to fall back to env, then to defaults.
+`RuntimeDeps.AgentLoop` supplies shared process defaults;
+non-zero fields and non-nil hooks in `AgentSpec.Loop` override those
+defaults for that agent.
 
 Everything else (provider API keys, model selection, workspace path,
 skill paths, etc.) is your config's responsibility — harness reads
@@ -373,12 +376,12 @@ a real failure.
 
 ## Status
 
-`v0.1.0` is the first tagged release. The v0.x line follows Go
+`v0.3.4` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.1.0
+go get github.com/sausheong/harness@v0.3.4
 ```
 
 Likely sources of v0.x churn before a v1.0.0:

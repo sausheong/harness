@@ -291,14 +291,24 @@ func ValidatePathInWorkDir(path, workDir string) error {
 		realWork = absWork // workspace might not exist yet
 	}
 
-	// For the target path, resolve the parent directory (file may not exist yet)
+	// Resolve an existing target itself so a final-component symlink cannot
+	// escape the workspace. For a path that does not exist yet, resolve its
+	// parent directory instead so callers can safely create a new file.
+	realPath, targetErr := filepath.EvalSymlinks(absPath)
+	if targetErr == nil {
+		if !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) && realPath != realWork {
+			return fmt.Errorf("path %q is outside workspace %q", path, workDir)
+		}
+		return nil
+	}
+
 	parentDir := filepath.Dir(absPath)
 	realParent, err := filepath.EvalSymlinks(parentDir)
 	if err != nil {
 		// Parent doesn't exist — use the unresolved absolute path
 		realParent = parentDir
 	}
-	realPath := filepath.Join(realParent, filepath.Base(absPath))
+	realPath = filepath.Join(realParent, filepath.Base(absPath))
 
 	if !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) && realPath != realWork {
 		return fmt.Errorf("path %q is outside workspace %q", path, workDir)
@@ -313,4 +323,3 @@ func ValidatePathInWorkDir(path, workDir string) error {
 func RegisterCron(reg *Registry, agentID string, scheduler JobScheduler) {
 	reg.Register(&CronTool{AgentID: agentID, Scheduler: scheduler})
 }
-

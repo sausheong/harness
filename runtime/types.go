@@ -46,9 +46,10 @@ type AgentSpec struct {
 	// Reasoning maps to each provider's native reasoning knob. Use
 	// llm.ReasoningOff (zero value), Low, Medium, or High.
 	Reasoning string
-	// Loop controls the runtime's tool-execution behavior (concurrency
-	// cap, depth cap, streaming-tools toggle). Zero value ⇒ env-var
-	// fallback then compiled-in defaults.
+	// Loop controls the runtime's per-agent tool-execution behavior
+	// (concurrency cap, depth cap, streaming-tools toggle). Non-zero fields
+	// and non-nil hooks override RuntimeDeps.AgentLoop; remaining zero values
+	// inherit the shared setting, then its env/default fallback.
 	Loop LoopConfig
 	// MCPServers, when non-empty, are connected by BuildRuntime: each
 	// server's tools are namespaced ("mcp__<Name>__<tool>") and added

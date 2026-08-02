@@ -132,6 +132,11 @@ type Runtime struct {
 	// AgentSpec.MCPServers. Released by Close. Untouched when MCP is
 	// not used.
 	mcpClients []*mcp.Client
+
+	// runMu enforces the Runtime contract that one session exchange runs at a
+	// time. TryLock lets a second caller receive a normal error instead of
+	// corrupting the shared event channel and run-scoped state.
+	runMu sync.Mutex
 }
 
 // Close releases external resources owned by the Runtime — currently
@@ -272,12 +277,17 @@ func isFileTool(name string) bool {
 
 // Run executes the agent loop for a user message, returning a channel of events.
 func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageContent) (<-chan AgentEvent, error) {
-	r.events = make(chan AgentEvent, 100)
+	if !r.runMu.TryLock() {
+		return nil, fmt.Errorf("runtime is already running")
+	}
+	events := make(chan AgentEvent, 100)
+	r.events = events
 	tr := TraceFrom(ctx)
 	tr.Mark("agent.run.start", "user_msg_len", len(userMsg), "images", len(images))
 
 	go func() {
-		defer close(r.events)
+		defer close(events)
+		defer r.runMu.Unlock()
 		defer tr.Summary()
 
 		// Flush the per-session calibrator once at Run end (all exit paths:
@@ -298,8 +308,15 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		// right reason without an explicit assignment at that exit.
 		stopReason := "max_turns"
 		if hook := r.AgentLoop.Hooks.OnStop; hook != nil {
-			defer func() { hook(ctx, stopReason) }()
+			defer func() { callOnStopHook(ctx, hook, stopReason) }()
 		}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				stopReason = "error"
+				err := recoveredPanicError("runtime", recovered)
+				r.emit(AgentEvent{Type: EventError, Error: err})
+			}
+		}()
 
 		// OnUserPromptSubmit may rewrite prompt and/or images BEFORE the
 		// session sees them. Returning err aborts Run with EventError.
@@ -812,7 +829,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		})
 	}()
 
-	return r.events, nil
+	return events, nil
 }
 
 // recoverFromPreTokenError attempts the same recovery the synchronous
@@ -895,28 +912,28 @@ func (r *Runtime) dispatchTool(
 	// BeforeToolUse fires before the PermissionChecker. A hook denial
 	// has the same observable shape as a Permission.Check denial.
 	if hook := r.AgentLoop.Hooks.BeforeToolUse; hook != nil {
-		d, err := hook(ctx, tc.Name, tc.Input)
+		d, err := callBeforeToolHook(ctx, hook, tc.Name, tc.Input)
 		if err != nil {
 			res := r.appendDenialResult(tc.ID, err.Error(), kgThread)
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
 		if !d.Allow {
 			res := r.appendDenialResult(tc.ID, d.Reason, kgThread)
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
 	}
 
 	if r.Permission != nil {
-		if d := r.Permission.Check(ctx, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
+		if d := callPermissionCheck(ctx, r.Permission, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
 			res := r.appendDenialResult(tc.ID, d.Reason, kgThread)
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
@@ -926,7 +943,7 @@ func (r *Runtime) dispatchTool(
 		return r.appendAbortedResult(tc.ID, kgThread), true
 	}
 
-	result, err := r.Tools.Execute(ctx, tc.Name, tc.Input)
+	result, err := callToolExecute(ctx, r.Tools, tc.Name, tc.Input)
 	if err != nil {
 		result = tool.ToolResult{Error: err.Error()}
 	}
@@ -952,7 +969,7 @@ func (r *Runtime) dispatchTool(
 	}
 
 	if hook := r.AgentLoop.Hooks.AfterToolUse; hook != nil {
-		hook(ctx, tc.Name, tc.Input, result)
+		callAfterToolHook(ctx, hook, tc.Name, tc.Input, result)
 	}
 
 	return result, false
@@ -963,27 +980,27 @@ func (r *Runtime) dispatchTool(
 // streaming kickoff goroutines.
 func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (result tool.ToolResult, aborted bool) {
 	if hook := r.AgentLoop.Hooks.BeforeToolUse; hook != nil {
-		d, err := hook(ctx, tc.Name, tc.Input)
+		d, err := callBeforeToolHook(ctx, hook, tc.Name, tc.Input)
 		if err != nil {
 			res := tool.ToolResult{Error: err.Error()}
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
 		if !d.Allow {
 			res := tool.ToolResult{Error: d.Reason}
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
 	}
 	if r.Permission != nil {
-		if d := r.Permission.Check(ctx, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
+		if d := callPermissionCheck(ctx, r.Permission, r.AgentID, tc.Name, tc.Input); d.Behavior == tool.DecisionDeny {
 			res := tool.ToolResult{Error: d.Reason}
 			if after := r.AgentLoop.Hooks.AfterToolUse; after != nil {
-				after(ctx, tc.Name, tc.Input, res)
+				callAfterToolHook(ctx, after, tc.Name, tc.Input, res)
 			}
 			return res, false
 		}
@@ -991,7 +1008,7 @@ func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (resu
 	if ctx.Err() != nil {
 		return tool.ToolResult{Error: "aborted by user"}, true
 	}
-	result, err := r.Tools.Execute(ctx, tc.Name, tc.Input)
+	result, err := callToolExecute(ctx, r.Tools, tc.Name, tc.Input)
 	if err != nil {
 		result = tool.ToolResult{Error: err.Error()}
 	}
@@ -1002,7 +1019,7 @@ func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (resu
 		r.recordFileTouch(extractPathFromInput(tc.Input))
 	}
 	if hook := r.AgentLoop.Hooks.AfterToolUse; hook != nil {
-		hook(ctx, tc.Name, tc.Input, result)
+		callAfterToolHook(ctx, hook, tc.Name, tc.Input, result)
 	}
 	return result, false
 }

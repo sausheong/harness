@@ -43,6 +43,21 @@ func TestExtractCommands_BackgroundAmpersand(t *testing.T) {
 	}
 }
 
+func TestUnknownExecPolicyFailsClosed(t *testing.T) {
+	bt := &BashTool{ExecPolicy: &ExecPolicy{Level: "allowlits", Allowlist: []string{"echo"}}}
+	in, err := json.Marshal(bashInput{Command: "echo should-not-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := bt.Execute(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Error, "invalid bash execution policy") {
+		t.Fatalf("unknown policy must fail closed, got %q", res.Error)
+	}
+}
+
 func TestSanitizeLLMText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -86,10 +101,10 @@ func TestResolveBashCommandPaths(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		cmd       string
-		wantCmd   string
-		wantSubs  int
+		name     string
+		cmd      string
+		wantCmd  string
+		wantSubs int
 	}{
 		{
 			name:     "backslash-escaped path with ascii spaces resolves to nbsp file",

@@ -53,8 +53,29 @@ func (s *Store) sessionPath(agentID, key string) string {
 	return filepath.Join(s.sessionDir(agentID), key+".jsonl")
 }
 
+// validateStoreComponent keeps caller-provided identifiers as one filesystem
+// path component. Empty values remain supported for backward compatibility,
+// but separators, volume names, and dot traversal are rejected.
+func validateStoreComponent(kind, value string) error {
+	if value == "." || value == ".." || filepath.VolumeName(value) != "" ||
+		strings.ContainsAny(value, `/\`) {
+		return fmt.Errorf("invalid %s %q: must be a single path component", kind, value)
+	}
+	return nil
+}
+
+func validateStoreIDs(agentID, key string) error {
+	if err := validateStoreComponent("agent ID", agentID); err != nil {
+		return err
+	}
+	return validateStoreComponent("session key", key)
+}
+
 // Load reads a session from its JSONL file.
 func (s *Store) Load(agentID, key string) (*Session, error) {
+	if err := validateStoreIDs(agentID, key); err != nil {
+		return nil, err
+	}
 	path := s.sessionPath(agentID, key)
 
 	f, err := os.Open(path)
@@ -103,6 +124,11 @@ func (s *Store) Load(agentID, key string) (*Session, error) {
 func (s *Store) AppendEntry(sess *Session, entry SessionEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := validateStoreIDs(sess.AgentID, sess.Key); err != nil {
+		s.markDegraded("invalid session path", err)
+		slog.Error("refusing to persist session outside store", "error", err)
+		return
+	}
 
 	dir := s.sessionDir(sess.AgentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -135,6 +161,9 @@ func (s *Store) AppendEntry(sess *Session, entry SessionEntry) {
 
 // Create creates an empty session file on disk so it shows up in List.
 func (s *Store) Create(agentID, key string) error {
+	if err := validateStoreIDs(agentID, key); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -153,6 +182,9 @@ func (s *Store) Create(agentID, key string) error {
 
 // List returns metadata for all sessions belonging to the given agent.
 func (s *Store) List(agentID string) ([]SessionInfo, error) {
+	if err := validateStoreComponent("agent ID", agentID); err != nil {
+		return nil, err
+	}
 	dir := s.sessionDir(agentID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -224,6 +256,9 @@ func (s *Store) List(agentID string) ([]SessionInfo, error) {
 
 // Exists checks whether a session file exists for the given agent and key.
 func (s *Store) Exists(agentID, key string) bool {
+	if validateStoreIDs(agentID, key) != nil {
+		return false
+	}
 	path := s.sessionPath(agentID, key)
 	_, err := os.Stat(path)
 	return err == nil
@@ -231,6 +266,12 @@ func (s *Store) Exists(agentID, key string) bool {
 
 // Rename renames a session file from oldKey to newKey.
 func (s *Store) Rename(agentID, oldKey, newKey string) error {
+	if err := validateStoreIDs(agentID, oldKey); err != nil {
+		return err
+	}
+	if err := validateStoreComponent("session key", newKey); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -249,6 +290,9 @@ func (s *Store) Rename(agentID, oldKey, newKey string) error {
 
 // Delete removes a session's JSONL file.
 func (s *Store) Delete(agentID, key string) error {
+	if err := validateStoreIDs(agentID, key); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -264,6 +308,11 @@ func (s *Store) Delete(agentID, key string) error {
 func (s *Store) Rewrite(sess *Session) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := validateStoreIDs(sess.AgentID, sess.Key); err != nil {
+		s.markDegraded("invalid session path", err)
+		slog.Error("refusing to rewrite session outside store", "error", err)
+		return
+	}
 
 	dir := s.sessionDir(sess.AgentID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

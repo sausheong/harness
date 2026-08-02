@@ -50,3 +50,16 @@ func TestStore_RewriteDegradedWarns(t *testing.T) {
 	require.Equal(t, 1, strings.Count(buf.String(), "session persistence degraded"),
 		"Rewrite failure must emit the degraded warning")
 }
+
+func TestStoreRejectsPathTraversalIdentifiers(t *testing.T) {
+	s := NewStore(t.TempDir())
+
+	_, err := s.Load("../outside", "key")
+	require.ErrorContains(t, err, "invalid agent ID")
+	require.ErrorContains(t, s.Create("agent", "../outside"), "invalid session key")
+	require.ErrorContains(t, s.Rename("agent", "../old", "new"), "invalid session key")
+	require.ErrorContains(t, s.Delete("agent", "../outside"), "invalid session key")
+	require.False(t, s.Exists("agent", "../outside"))
+	_, err = s.List("../outside")
+	require.ErrorContains(t, err, "invalid agent ID")
+}

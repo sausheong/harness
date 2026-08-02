@@ -4,6 +4,7 @@
 !/developer.md
 !/examples/*/kb/
 !/examples/*/kb/*.md
+/docs/
 
 # Other prose/document formats
 *.txt

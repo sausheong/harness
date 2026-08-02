@@ -166,6 +166,8 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 		}
 	}
 
+	loop := mergeLoopConfig(deps.AgentLoop, spec.Loop)
+
 	rt := &Runtime{
 		LLM:                inputs.Provider,
 		Tools:              inputs.Tools,
@@ -186,7 +188,7 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 		Permission:         deps.Permission,
 		Compaction:         inputs.Compaction,
 		IngestSource:       inputs.IngestSource,
-		AgentLoop:          deps.AgentLoop,
+		AgentLoop:          loop,
 		StaticSystemPrompt: staticPrompt,
 		CalibratorStore:    deps.CalibratorStore,
 		mcpClients:         mcpClients,
@@ -205,4 +207,40 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 	}
 
 	return rt, nil
+}
+
+// mergeLoopConfig applies the per-agent non-zero settings over the shared
+// defaults. LoopConfig intentionally uses zero values as "inherit/default",
+// so this preserves existing RuntimeDeps.AgentLoop behavior while making the
+// documented AgentSpec.Loop override effective.
+func mergeLoopConfig(base, override LoopConfig) LoopConfig {
+	out := base
+	if override.MaxToolConcurrency > 0 {
+		out.MaxToolConcurrency = override.MaxToolConcurrency
+	}
+	if override.MaxAgentDepth > 0 {
+		out.MaxAgentDepth = override.MaxAgentDepth
+	}
+	if override.StreamingTools {
+		out.StreamingTools = true
+	}
+	if override.MaxToolResultLen > 0 {
+		out.MaxToolResultLen = override.MaxToolResultLen
+	}
+	if override.Hooks.OnUserPromptSubmit != nil {
+		out.Hooks.OnUserPromptSubmit = override.Hooks.OnUserPromptSubmit
+	}
+	if override.Hooks.OnSessionStart != nil {
+		out.Hooks.OnSessionStart = override.Hooks.OnSessionStart
+	}
+	if override.Hooks.BeforeToolUse != nil {
+		out.Hooks.BeforeToolUse = override.Hooks.BeforeToolUse
+	}
+	if override.Hooks.AfterToolUse != nil {
+		out.Hooks.AfterToolUse = override.Hooks.AfterToolUse
+	}
+	if override.Hooks.OnStop != nil {
+		out.Hooks.OnStop = override.Hooks.OnStop
+	}
+	return out
 }

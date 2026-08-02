@@ -289,6 +289,10 @@ func (t *BrowserTool) Execute(ctx context.Context, input json.RawMessage) (tool.
 		if in.Script == "" {
 			return tool.ToolResult{Error: "script is required for evaluate action"}, nil
 		}
+	case "navigate", "get_text", "screenshot":
+		// No additional required fields beyond the checks above.
+	default:
+		return tool.ToolResult{Error: fmt.Sprintf("unknown action: %q (valid: navigate, click, type, get_text, screenshot, evaluate, close)", in.Action)}, nil
 	}
 
 	// Catch the about:blank trap: any post-navigation action (screenshot,
@@ -390,7 +394,7 @@ func (t *BrowserTool) getOrCreateSession(name string) (*browserSession, error) {
 	// both — wrap it.
 	sess := &browserSession{
 		taskCtx:     taskCtx,
-		taskCancel:  cleanup, // cleanup tears down both task + alloc
+		taskCancel:  cleanup,   // cleanup tears down both task + alloc
 		allocCancel: func() {}, // no-op; cleanup already covers alloc
 		lastUsed:    time.Now(),
 	}
