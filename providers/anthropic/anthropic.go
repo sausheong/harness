@@ -98,10 +98,54 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 	if sys := buildAnthropicSystem(req); len(sys) > 0 {
 		params.System = sys
 	}
-	if req.Temperature > 0 && !anthropicAdaptiveThinkingOnly(model) {
+	if req.TemperatureSet {
+		// Protocol-proxy requests must preserve even an explicit zero. Let the
+		// upstream API reject an incompatible client combination unchanged.
+		params.Temperature = anthropic.Float(req.Temperature)
+	} else if req.Temperature > 0 && !anthropicAdaptiveThinkingOnly(model) {
+		// Portable Harness callers retain the provider's compatibility guard:
+		// adaptive-only models reject sampling parameters while thinking.
 		params.Temperature = anthropic.Float(req.Temperature)
 	}
-	if anthropicAdaptiveThinkingOnly(model) {
+	if native := req.NativeReasoning; native != nil {
+		// Proxy mode preserves exactly what the client requested. Do not infer a
+		// model default, silently remove sampling controls, or enlarge max_tokens:
+		// the upstream should accept or reject the same semantics as a direct call.
+		switch native.Type {
+		case "adaptive":
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
+					Display: anthropic.ThinkingConfigAdaptiveDisplay(native.Display),
+				},
+			}
+		case "enabled":
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfEnabled: &anthropic.ThinkingConfigEnabledParam{
+					BudgetTokens: native.BudgetTokens,
+					Display:      anthropic.ThinkingConfigEnabledDisplay(native.Display),
+				},
+			}
+		case "disabled":
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfDisabled: &anthropic.ThinkingConfigDisabledParam{},
+			}
+		}
+		if native.Effort != "" {
+			params.OutputConfig = anthropic.OutputConfigParam{
+				Effort: anthropic.OutputConfigEffort(native.Effort),
+			}
+		}
+		if len(native.OutputFormat) > 0 {
+			var format anthropic.JSONOutputFormatParam
+			if err := json.Unmarshal(native.OutputFormat, &format); err == nil {
+				params.OutputConfig.Format = format
+			} else {
+				// Decoders are expected to validate this before constructing the
+				// request. Keep this defensive diagnostic for direct Harness callers.
+				slog.Error("invalid native Anthropic output format", "err", err)
+			}
+		}
+	} else if anthropicAdaptiveThinkingOnly(model) {
 		// Fable 5 / Mythos 5 / Opus 4.7+ / Opus 5 / Sonnet 5 reject the
 		// legacy enabled+budget_tokens config (400 "thinking.type.enabled
 		// is not supported"). They take {type:"adaptive"} plus

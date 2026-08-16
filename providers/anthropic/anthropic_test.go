@@ -668,6 +668,57 @@ func TestAdaptiveThinkingModels_ReasoningOffOmitsThinking(t *testing.T) {
 	assert.NotContains(t, got, `"output_config"`)
 }
 
+func TestNativeReasoningConfigPreservesInboundProxySemantics(t *testing.T) {
+	p := &AnthropicProvider{}
+	tests := []struct {
+		name   string
+		config *llm.NativeReasoningConfig
+		want   []string
+	}{
+		{
+			name:   "adaptive effort max",
+			config: &llm.NativeReasoningConfig{Type: "adaptive", Effort: "max"},
+			want:   []string{`"thinking":{"type":"adaptive"}`, `"output_config":{"effort":"max"}`},
+		},
+		{
+			name:   "enabled exact budget",
+			config: &llm.NativeReasoningConfig{Type: "enabled", BudgetTokens: 3072},
+			want:   []string{`"thinking":{"budget_tokens":3072,"type":"enabled"}`},
+		},
+		{
+			name:   "explicit disabled",
+			config: &llm.NativeReasoningConfig{Type: "disabled"},
+			want:   []string{`"thinking":{"type":"disabled"}`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			params := p.buildMessageParams(llm.ChatRequest{
+				Model: "claude-opus-4-8-global", MaxTokens: 2048,
+				Messages:        []llm.Message{{Role: "user", Content: "hello"}},
+				NativeReasoning: test.config,
+			})
+			raw, err := json.Marshal(params)
+			require.NoError(t, err)
+			for _, want := range test.want {
+				assert.Contains(t, string(raw), want)
+			}
+			assert.Contains(t, string(raw), `"max_tokens":2048`, "proxy mode must not enlarge max_tokens")
+		})
+	}
+}
+
+func TestNativeProxyPreservesExplicitZeroTemperature(t *testing.T) {
+	p := &AnthropicProvider{}
+	params := p.buildMessageParams(llm.ChatRequest{
+		Model: "claude-opus-4-8-global", MaxTokens: 32, Temperature: 0, TemperatureSet: true,
+		Messages: []llm.Message{{Role: "user", Content: "hello"}},
+	})
+	raw, err := json.Marshal(params)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"temperature":0`)
+}
+
 func TestAdaptiveThinkingModels_TemperatureDropped(t *testing.T) {
 	p := NewAnthropicProvider("test-key", "")
 	for _, model := range []string{

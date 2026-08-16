@@ -108,6 +108,31 @@ const (
 	ReasoningHigh   ReasoningMode = "high"
 )
 
+// NativeReasoningConfig preserves an inbound provider reasoning request when
+// Harness is used as a protocol proxy. A nil config means the client omitted
+// the provider's reasoning controls; this is deliberately different from an
+// explicit disabled config because some models think by default.
+//
+// Type is "adaptive", "enabled", or "disabled". BudgetTokens applies to
+// enabled thinking and Effort is one of "low", "medium", "high", or "max".
+// Providers that cannot represent the requested semantics must reject the
+// request instead of silently changing it.
+type NativeReasoningConfig struct {
+	Type         string
+	BudgetTokens int64
+	Effort       string
+	Display      string
+	// OutputFormat is the provider-native structured-output format object.
+	// It is kept as JSON so a protocol proxy can preserve schemas without
+	// forcing provider-specific types into the portable llm package.
+	OutputFormat json.RawMessage
+}
+
+// Enabled reports whether the client explicitly requested reasoning.
+func (c *NativeReasoningConfig) Enabled() bool {
+	return c != nil && (c.Type == "adaptive" || c.Type == "enabled")
+}
+
 // ParseReasoningMode parses a config string into a ReasoningMode.
 // Accepts "" or "off" for ReasoningOff; "low", "medium", "high" for
 // the named levels. Case-sensitive. Returns an error for unknown values.
@@ -128,12 +153,15 @@ func ParseReasoningMode(s string) (ReasoningMode, error) {
 
 // ChatRequest is the input to a streaming chat call.
 type ChatRequest struct {
-	Model        string
-	Messages     []Message
-	Tools        []ToolDef
-	MaxTokens    int
-	Temperature  float64
-	SystemPrompt string
+	Model       string
+	Messages    []Message
+	Tools       []ToolDef
+	MaxTokens   int
+	Temperature float64
+	// TemperatureSet distinguishes an omitted sampling parameter from an
+	// explicit zero, which is material when proxying an existing API request.
+	TemperatureSet bool
+	SystemPrompt   string
 	// SystemPromptParts, when non-empty, replaces SystemPrompt. Providers
 	// that support caching emit one block per part, attaching cache markers
 	// per Cache flag. Providers that don't support caching concatenate
@@ -147,6 +175,9 @@ type ChatRequest struct {
 	// SessionID is routing metadata only and is not sent to providers.
 	SessionID string
 	Reasoning ReasoningMode // zero value = ReasoningOff; safe default
+	// NativeReasoning takes precedence over the portable Reasoning knob and
+	// preserves exact inbound proxy semantics, including omitted vs disabled.
+	NativeReasoning *NativeReasoningConfig
 }
 
 // Usage tracks token usage.
