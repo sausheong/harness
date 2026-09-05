@@ -141,10 +141,24 @@ func windowByModelFamily(modelID string) int {
 		return 8192
 	case strings.HasPrefix(leaf, "gpt-3.5"):
 		return 16385
-	case strings.Contains(id, "gemini-1.5-pro"):
+	case strings.Contains(id, "gemini") && strings.Contains(id, "pro"):
+		// Every "Pro"-tier Gemini release so far (1.5 Pro onward) has
+		// shipped the largest window in its generation. Matching on the
+		// tier rather than enumerating each version keeps a future Pro
+		// release (2.5, 3, ...) from falling through to the
+		// flash/other-tier case below, let alone all the way to
+		// defaultRemoteUnknownWindow.
 		return 2000000
-	case strings.Contains(id, "gemini-1.5-flash"),
-		strings.Contains(id, "gemini-2"):
+	case strings.Contains(id, "gemini"):
+		// Every non-Pro Gemini model since 1.5 (Flash and other tiers)
+		// has shipped at least a 1M window. Matching on the family alone
+		// — not "gemini-1.5-flash"/"gemini-2" by exact version — means a
+		// new Gemini generation (3.x and beyond) gets a realistic window
+		// immediately instead of silently falling back to
+		// defaultRemoteUnknownWindow (128k), which made preventive
+		// compaction fire far too early and the context-usage gauge
+		// read a nonsensical >100% for a model this table simply hadn't
+		// been updated for yet.
 		return 1000000
 	}
 	return 0

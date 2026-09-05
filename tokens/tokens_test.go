@@ -52,6 +52,29 @@ func TestContextWindowKnown(t *testing.T) {
 	}
 }
 
+// Regression: a Gemini generation newer than the ones explicitly
+// enumerated (3.x and beyond) must not fall through to
+// defaultRemoteUnknownWindow (128k) just because this table hasn't been
+// updated with its exact version string yet — every non-Pro Gemini
+// model since 1.5 has shipped at least a 1M window, and every Pro-tier
+// release has shipped at least 2M.
+func TestContextWindowGeminiFutureGenerationsDefaultByTier(t *testing.T) {
+	tests := []struct {
+		model string
+		want  int
+	}{
+		{"openai/gemini-3.8-flash-global", 1000000}, // proxied under an unrelated provider label, as via a LiteLLM gateway
+		{"google/gemini-3-flash", 1000000},
+		{"google/gemini-3-pro", 2000000},
+		{"google/gemini-4.0-flash-lite", 1000000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			assert.Equal(t, tc.want, ContextWindow(tc.model))
+		})
+	}
+}
+
 func TestContextWindowUnknownRemoteReturnsRemoteFallback(t *testing.T) {
 	// Non-local unknown models default to 128k — frontier proxies are
 	// overwhelmingly 128k+, and reactive compaction handles overflow.
