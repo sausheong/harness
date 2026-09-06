@@ -85,17 +85,17 @@ func TestBuildStaticSystemPromptIncludesMemoryFiles(t *testing.T) {
 }
 
 func TestBuildDynamicSystemPromptSuffixEmpty(t *testing.T) {
-	got := buildDynamicSystemPromptSuffix("", "")
+	got := buildDynamicSystemPromptSuffix("", "", "")
 	require.Equal(t, "", got)
 }
 
 func TestBuildDynamicSystemPromptSuffixHintOnly(t *testing.T) {
-	got := buildDynamicSystemPromptSuffix("", "\n\nHINT")
+	got := buildDynamicSystemPromptSuffix("", "", "\n\nHINT")
 	require.Equal(t, "\n\nHINT", got)
 }
 
 func TestBuildDynamicSystemPromptSuffixDateAndHint(t *testing.T) {
-	got := buildDynamicSystemPromptSuffix("Today's date is 2026-05-01.", "\n\nKG_HINT")
+	got := buildDynamicSystemPromptSuffix("", "Today's date is 2026-05-01.", "\n\nKG_HINT")
 	dateIdx := strings.Index(got, "Today's date is")
 	hintIdx := strings.Index(got, "KG_HINT")
 	require.True(t, dateIdx >= 0 && hintIdx > dateIdx,
@@ -103,9 +103,17 @@ func TestBuildDynamicSystemPromptSuffixDateAndHint(t *testing.T) {
 }
 
 func TestBuildDynamicSystemPromptSuffixIncludesDate(t *testing.T) {
-	got := buildDynamicSystemPromptSuffix("Today's date is 2026-05-01.", "")
+	got := buildDynamicSystemPromptSuffix("", "Today's date is 2026-05-01.", "")
 	require.True(t, strings.HasPrefix(got, "Today's date is 2026-05-01."),
 		"date line must appear at the top of the dynamic suffix")
+}
+
+func TestBuildDynamicSystemPromptSuffixIdentityHintLeadsDate(t *testing.T) {
+	got := buildDynamicSystemPromptSuffix("IDENTITY_HINT", "Today's date is 2026-05-01.", "\n\nKG_HINT")
+	identityIdx := strings.Index(got, "IDENTITY_HINT")
+	dateIdx := strings.Index(got, "Today's date is")
+	require.True(t, identityIdx == 0 && dateIdx > identityIdx,
+		"order must be identity hint < date; got %d %d", identityIdx, dateIdx)
 }
 
 func TestFormatDateLine(t *testing.T) {

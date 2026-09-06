@@ -85,6 +85,19 @@ type Runtime struct {
 	// prompt cache hits.
 	StaticSystemPrompt string
 
+	// DynamicIdentityHint is caller-set text re-sent, uncached, in every
+	// turn's system prompt (see buildDynamicSystemPromptSuffix) — unlike
+	// StaticSystemPrompt, safe to mutate mid-conversation (e.g. after a
+	// live model switch) and have the very next turn pick it up. Exists
+	// because a fact baked only into the cached static prompt competes
+	// poorly against the model's own prior statements already visible in
+	// message history: asked "which model are you" a second time, a model
+	// tends to just repeat what it told the user earlier in the same
+	// conversation over a background instruction it read once at the top
+	// of a large cached block. Resending the fact fresh, every turn, gives
+	// it the same recency the model grants its own last answer.
+	DynamicIdentityHint string
+
 	// Permission gates tool execution at dispatch time. nil → allow-all.
 	Permission tool.PermissionChecker
 
@@ -437,7 +450,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				kgCh = nil
 			}
 
-			dynamicSuffix := buildDynamicSystemPromptSuffix(dateLine, kgContext)
+			dynamicSuffix := buildDynamicSystemPromptSuffix(r.DynamicIdentityHint, dateLine, kgContext)
 
 			staticText := r.StaticSystemPrompt
 			parts := []llm.SystemPromptPart{

@@ -142,18 +142,23 @@ func BuildStaticSystemPrompt(
 }
 
 // buildDynamicSystemPromptSuffix concatenates the per-turn dynamic context
-// — the date line and the cortex hint — into a single string the runtime
-// sends as the second (un-cached) SystemPromptPart. The date line, when
-// non-empty, appears at the top so the model anchors on "today" before
-// the per-turn content. Returns "" when all inputs are empty/nil.
+// — the identity hint, date line, and cortex hint — into a single string
+// the runtime sends as the second (un-cached) SystemPromptPart. identityHint
+// leads (see Runtime.DynamicIdentityHint: it needs to outweigh the model's
+// own prior in-conversation statements, so it gets the most prominent
+// position), then the date line so the model anchors on "today" before the
+// per-turn content. Returns "" when all inputs are empty/nil.
 //
 // As of sub-project 5, skill bodies and memory entries are no longer
 // auto-injected here. Their indices live in the cached static prompt
 // and the agent loads bodies on demand via the load_skill / load_memory
 // tools. This trims 5–15 KB of speculative skill bodies and 5–10 KB of
 // speculative memory bodies from every prefill.
-func buildDynamicSystemPromptSuffix(dateLine, cortexContext string) string {
+func buildDynamicSystemPromptSuffix(identityHint, dateLine, cortexContext string) string {
 	var sb strings.Builder
+	if identityHint != "" {
+		sb.WriteString(identityHint)
+	}
 	if dateLine != "" {
 		sb.WriteString(dateLine)
 	}

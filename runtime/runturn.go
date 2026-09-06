@@ -84,9 +84,10 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 		cancel()
 	}
 
+	dynamicSuffix := buildDynamicSystemPromptSuffix(r.DynamicIdentityHint, "", kgHint)
 	parts := []llm.SystemPromptPart{{Text: r.StaticSystemPrompt, Cache: true}}
-	if kgHint != "" {
-		parts = append(parts, llm.SystemPromptPart{Text: kgHint, Cache: false})
+	if dynamicSuffix != "" {
+		parts = append(parts, llm.SystemPromptPart{Text: dynamicSuffix, Cache: false})
 	}
 	req := llm.ChatRequest{
 		Model:             r.Model,
