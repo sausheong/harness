@@ -59,7 +59,8 @@ required pieces are inside `inputs`; everything in `deps` is optional;
 The four mandatory pieces:
 
 * **`llm.LLMProvider`** (in `RuntimeInputs.Provider`) — a streaming
-  chat client (Anthropic / OpenAI / Gemini / Qwen, or your own).
+  chat client (Anthropic / OpenAI / Gemini / LiteLLM / OpenRouter, or
+  your own).
 * **`tool.Registry`** (in `RuntimeInputs.Tools`) — the tools the LLM
   may invoke. Each tool implements `tool.Tool`.
 * **`session.Session`** (in `RuntimeInputs.Session`) — append-only
@@ -387,9 +388,10 @@ Each provider has its own constructor. All return an `llm.LLMProvider`.
 |--------------|--------------------------------------------------------|-------------------------------------|
 | Anthropic    | `anthropic.NewAnthropicProvider(apiKey, baseURL)`      | `baseURL == ""` → official endpoint |
 | OpenAI       | `openai.NewOpenAIProvider(apiKey, baseURL)`            | `baseURL == ""` → official endpoint |
-| OpenAI-compat| `openai.NewOpenAIProviderWithKind(apiKey, baseURL, "ollama"\|"compat")` | for local Ollama, etc.   |
+| OpenAI-compat| `openai.NewOpenAIProviderWithKind(apiKey, baseURL, "local"\|"openai-compatible")` | for local Ollama, etc.   |
 | Gemini       | `gemini.NewGeminiProvider(ctx, apiKey)`                | takes `context.Context`             |
-| Qwen         | `qwen.NewQwenProvider(apiKey, baseURL)`                | OpenAI-compatible endpoint          |
+| LiteLLM      | `litellm.NewLiteLLMProvider(apiKey, baseURL)`          | `baseURL` required (self-hosted)    |
+| OpenRouter   | `openrouter.NewOpenRouterProvider(apiKey, baseURL)`    | `baseURL == ""` → OpenRouter's public endpoint |
 
 The provider you pass on `RuntimeInputs.Provider` only needs to match the
 provider prefix in `AgentSpec.Model` — `runtime.BuildRuntime` parses

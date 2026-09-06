@@ -98,7 +98,7 @@ type SystemPromptPart struct {
 // Zero value (ReasoningOff) means no extended reasoning — safe default
 // for existing call sites that don't set the field. Each provider maps
 // this to its native config (Anthropic thinking budget, OpenAI
-// reasoning_effort, Gemini ThinkingConfig, Qwen enable_thinking).
+// reasoning_effort, Gemini ThinkingConfig).
 type ReasoningMode string
 
 const (
@@ -295,10 +295,10 @@ func JoinSystemPromptParts(parts []SystemPromptPart) string {
 // ProviderOptions holds connection details for creating an LLM provider.
 // Kept here so consumers can pass a single struct around even though the
 // concrete provider constructors live in subpackages
-// (harness/providers/{anthropic,openai,gemini,qwen}). Each subpackage's
-// New() takes the relevant fields directly.
+// (harness/providers/{anthropic,openai,gemini,litellm,openrouter}). Each
+// subpackage's New() takes the relevant fields directly.
 type ProviderOptions struct {
 	APIKey  string
 	BaseURL string
-	Kind    string // "anthropic" | "openai" | "openai-compatible" | "local" | "gemini" | "qwen"
+	Kind    string // "anthropic" | "openai" | "openai-compatible" | "local" | "gemini"
 }

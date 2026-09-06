@@ -34,8 +34,8 @@ const stripCacheMax = 256
 // ApplyStripList runs StripFields over each tool's Parameters with the
 // given field-strip list, preserving input order and accumulating
 // diagnostics across all tools. The per-provider NormalizeToolSchema
-// methods (OpenAI, Qwen, Gemini) are thin wrappers over this helper —
-// only the strip list differs. Anthropic doesn't use this (identity).
+// methods (OpenAI, Gemini) are thin wrappers over this helper — only the
+// strip list differs. Anthropic doesn't use this (identity).
 //
 // Memoized: identical inputs return cached output without re-walking
 // the JSON Schema. Cache key is a SHA-256 over (sorted fields, tool

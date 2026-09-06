@@ -339,7 +339,7 @@ func geminiSupportsThinking(model string) bool {
 }
 
 // geminiResolveSystemPrompt returns the effective system prompt string,
-// preferring SystemPromptParts when present. Mirrors the OpenAI/Qwen
+// preferring SystemPromptParts when present. Mirrors the OpenAI
 // resolution path but the per-provider helper avoids importing the
 // genai SDK in test code.
 func geminiResolveSystemPrompt(req llm.ChatRequest) string {

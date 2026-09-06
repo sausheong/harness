@@ -87,8 +87,9 @@ a lot. The package is optimized for the use cases above, not these.
   hardened in 1.25. Older toolchains will fail at `go build`.
 - **An LLM API key**, depending on which provider(s) you wire in:
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, Google ADC for Gemini, or a
-  Qwen DashScope key. For local models, point `openai.NewOpenAIProviderWithKind`
-  at an Ollama endpoint — no key required.
+  LiteLLM/OpenRouter key for those aggregators. For local models, point
+  `openai.NewOpenAIProviderWithKind` at an Ollama endpoint — no key
+  required.
 - **Optional: an MCP server** for `tools/mcp` integrations (any
   binary that speaks the Model Context Protocol — `npx
   @modelcontextprotocol/server-filesystem`, etc.).
@@ -121,7 +122,8 @@ github.com/sausheong/harness/
 │   ├── anthropic/      # Anthropic LLMProvider (with prompt caching)
 │   ├── openai/         # OpenAI / OpenAI-compatible / local Ollama
 │   ├── gemini/         # Google Gemini via google.golang.org/genai
-│   └── qwen/           # Alibaba Qwen (OpenAI-compatible endpoint)
+│   ├── litellm/        # Self-hosted LiteLLM proxy (OpenAI-compatible)
+│   └── openrouter/     # OpenRouter aggregator (OpenAI-compatible)
 └── tools/              # Batteries-included concrete tools (each importable separately)
     ├── file/           # read_file (with vision), write_file, edit_file
     ├── bash/           # bash (with ExecPolicy: deny | allowlist | full)
@@ -313,9 +315,12 @@ Deliberately not in scope (numbers from the same conceptual list):
   `clientcredentials.Config.Client(ctx)`) as `HTTPClient` —
   auto-refresh comes for free. Call `Runtime.Close()` to release
   sessions.
-- **Four providers, one interface.** Anthropic, OpenAI (and
-  OpenAI-compatible / local Ollama), Gemini, and Qwen ship built-in.
-  Adding a fifth is implementing `llm.Provider` (~300 LOC).
+- **Five providers, one interface.** Anthropic, OpenAI (and
+  OpenAI-compatible / local Ollama), Gemini, LiteLLM, and OpenRouter ship
+  built-in — LiteLLM and OpenRouter cost none of that ~300 LOC each,
+  since both are thin constructors over the existing OpenAI-compatible
+  path. Adding a genuinely new wire format is implementing
+  `llm.Provider` (~300 LOC).
 
 See [`developer.md`](./developer.md) for a step-by-step guide to
 building agents on top of Harness, including diagrams of the
