@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.3.6.** Latest tagged release. The `runtime` API
+> **Status: v0.3.9.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -256,7 +256,7 @@ caller — you own the binary, you own the UI, you own the channel.
 | 3 | **Tool registry & schemas** | `tool.Registry`; `ToolDefs()` is sorted by name so the request prefix is stable across turns (cache hit) |
 | 4 | **Tool execution & permissions** | `tool.PermissionChecker` (`Check` + `FilterToolDefs`); concurrency-safe partitioning via `Tool.IsConcurrencySafe` + `LoopConfig.MaxToolConcurrency` (default 10) |
 | 5 | **Context & compaction** | `compaction.Manager` — summarize-and-splice at a clean user-message boundary; tool-result pruning at request time |
-| 6 | **System prompt assembly** | `llm.SystemPromptPart` — splits the static cacheable prefix from the per-turn dynamic suffix; provider-side `cache_control` placement is automatic |
+| 6 | **System prompt assembly** | `llm.SystemPromptPart` — splits the static cacheable prefix (`Runtime.StaticSystemPrompt`, built once) from the per-turn dynamic suffix (date line, KG hint, and `Runtime.DynamicIdentityHint` for any caller-mutable fact — e.g. the active model name after a live switch — that needs fresher recency than the cached prefix gives it); provider-side `cache_control` placement is automatic |
 | 7 | **Sub-agents / delegation** | `runtime.SubagentResolver` interface + `MaxAgentDepth=3` cap; subagents run as in-process goroutines with their own `Runtime` |
 | 8 | **Hooks** | `runtime.LifecycleHooks` (on `LoopConfig.Hooks`): `OnUserPromptSubmit`, `OnSessionStart`, `BeforeToolUse`, `AfterToolUse`, `OnStop`. Go callbacks — type-safe, in-process, nil-friendly |
 | 9 | **MCP** | `tools/mcp` package: `mcp.Connect(ctx, ServerConfig)` adapts an external MCP server's tools as `tool.Tool`s. Declare `AgentSpec.MCPServers` for auto-wiring; `Runtime.Close()` releases sessions |
@@ -380,12 +380,12 @@ a real failure.
 
 ## Status
 
-`v0.3.6` is the latest tagged release. The v0.x line follows Go
+`v0.3.9` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.3.6
+go get github.com/sausheong/harness@v0.3.9
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
