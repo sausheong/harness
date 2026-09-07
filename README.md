@@ -87,8 +87,8 @@ a lot. The package is optimized for the use cases above, not these.
   hardened in 1.25. Older toolchains will fail at `go build`.
 - **An LLM API key**, depending on which provider(s) you wire in:
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, Google ADC for Gemini, or a
-  LiteLLM/OpenRouter key for those aggregators. For local models,
-  `ollama.NewOllamaProvider` needs no key at all.
+  LiteLLM/OpenRouter key for those aggregators. For local models
+  (Ollama, LM Studio, etc.), `local.NewLocalProvider` needs no key at all.
 - **Optional: an MCP server** for `tools/mcp` integrations (any
   binary that speaks the Model Context Protocol — `npx
   @modelcontextprotocol/server-filesystem`, etc.).
@@ -119,11 +119,11 @@ github.com/sausheong/harness/
 │                       # MemoryProvider/SkillProvider/KnowledgeGraph interfaces
 ├── providers/
 │   ├── anthropic/      # Anthropic LLMProvider (with prompt caching)
-│   ├── openai/         # OpenAI / OpenAI-compatible / local Ollama
+│   ├── openai/         # OpenAI / OpenAI-compatible
 │   ├── gemini/         # Google Gemini via google.golang.org/genai
 │   ├── litellm/        # Self-hosted LiteLLM proxy (OpenAI-compatible)
 │   ├── openrouter/     # OpenRouter aggregator (OpenAI-compatible)
-│   └── ollama/         # Local Ollama server (OpenAI-compatible, no API key)
+│   └── local/          # Local model server — Ollama, LM Studio, etc. (OpenAI-compatible, no API key)
 └── tools/              # Batteries-included concrete tools (each importable separately)
     ├── file/           # read_file (with vision), write_file, edit_file
     ├── bash/           # bash (with ExecPolicy: deny | allowlist | full)
@@ -316,10 +316,10 @@ Deliberately not in scope (numbers from the same conceptual list):
   auto-refresh comes for free. Call `Runtime.Close()` to release
   sessions.
 - **Six providers, one interface.** Anthropic, OpenAI, Gemini, LiteLLM,
-  OpenRouter, and Ollama ship built-in — LiteLLM, OpenRouter, and Ollama
-  cost none of that ~300 LOC each, since all three are thin constructors
-  over the existing OpenAI-compatible path. Adding a genuinely new wire
-  format is implementing `llm.Provider` (~300 LOC).
+  OpenRouter, and local (Ollama, LM Studio, etc.) ship built-in — LiteLLM,
+  OpenRouter, and local cost none of that ~300 LOC each, since all three
+  are thin constructors over the existing OpenAI-compatible path. Adding
+  a genuinely new wire format is implementing `llm.Provider` (~300 LOC).
 
 See [`developer.md`](./developer.md) for a step-by-step guide to
 building agents on top of Harness, including diagrams of the

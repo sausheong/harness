@@ -60,7 +60,7 @@ The four mandatory pieces:
 
 * **`llm.LLMProvider`** (in `RuntimeInputs.Provider`) — a streaming
   chat client (Anthropic / OpenAI / Gemini / LiteLLM / OpenRouter /
-  Ollama, or your own).
+  local (Ollama, LM Studio, etc.), or your own).
 * **`tool.Registry`** (in `RuntimeInputs.Tools`) — the tools the LLM
   may invoke. Each tool implements `tool.Tool`.
 * **`session.Session`** (in `RuntimeInputs.Session`) — append-only
@@ -392,7 +392,7 @@ Each provider has its own constructor. All return an `llm.LLMProvider`.
 | Gemini       | `gemini.NewGeminiProvider(ctx, apiKey)`                | takes `context.Context`             |
 | LiteLLM      | `litellm.NewLiteLLMProvider(apiKey, baseURL)`          | `baseURL` required (self-hosted)    |
 | OpenRouter   | `openrouter.NewOpenRouterProvider(apiKey, baseURL)`    | `baseURL == ""` → OpenRouter's public endpoint |
-| Ollama       | `ollama.NewOllamaProvider(baseURL)`                    | `baseURL == ""` → `http://localhost:11434/v1`; no API key |
+| Local        | `local.NewLocalProvider(baseURL)`                      | `baseURL == ""` → `http://localhost:11434/v1` (Ollama's default; override for LM Studio, llama.cpp, vLLM, etc.); no API key |
 
 The provider you pass on `RuntimeInputs.Provider` only needs to match the
 provider prefix in `AgentSpec.Model` — `runtime.BuildRuntime` parses
