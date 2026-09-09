@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sausheong/harness/budget"
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
 )
@@ -19,7 +20,7 @@ type TurnResult struct {
 	StopReason string                 // "continue" | "completed" | "error" | "aborted"
 	Entries    []session.SessionEntry // entries appended during THIS turn, in order
 	Err        error
-	Usage      *llm.Usage
+	Usage      *llm.Usage // reported aggregate for this call, including retries
 }
 
 // TurnEmit is an optional live-streaming callback. Pass nil for headless
@@ -40,9 +41,54 @@ type TurnEmit func(AgentEvent)
 // responsibility). It DOES perform bounded-synchronous knowledge-graph recall on
 // the first round of an exchange (folding the hint into the system prompt) and
 // async knowledge-graph ingest on the completing round.
-func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.ImageContent, emit TurnEmit) (TurnResult, error) {
+func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.ImageContent, emit TurnEmit) (turnOutcome TurnResult, turnError error) {
+	if r.MaxOutputTokens < 0 {
+		return TurnResult{}, fmt.Errorf("max output tokens cannot be negative")
+	}
+	if !r.runMu.TryLock() {
+		return TurnResult{}, fmt.Errorf("runtime is already running")
+	}
+	defer r.runMu.Unlock()
+	var budgetErr error
+	ctx, budgetErr = r.budgetContext(ctx)
+	if budgetErr != nil {
+		return TurnResult{}, budgetErr
+	}
+
+	ctx, deadlineCancel, deadlineErr := budget.WithDeadline(ctx, r.Session)
+	if deadlineErr != nil {
+		return TurnResult{}, deadlineErr
+	}
+	defer deadlineCancel()
+	ctx, cancelTurn := context.WithCancel(ctx)
+	defer cancelTurn()
 	if emit == nil {
 		emit = func(AgentEvent) {}
+	}
+	ledger := &llm.UsageLedger{}
+	ctx = llm.WithUsageObserver(ctx, ledger.Record)
+	emittedUsage := 0
+	flushUsage := func() {
+		records := ledger.Records()
+		for ; emittedUsage < len(records); emittedUsage++ {
+			record := records[emittedUsage]
+			emit(AgentEvent{Type: EventRequestUsage, RequestUsage: &record, Usage: ledger.Total()})
+		}
+	}
+	defer flushUsage()
+	defer func() {
+		reason := turnOutcome.StopReason
+		if reason == "" {
+			if ctx.Err() != nil {
+				reason = "aborted"
+			} else {
+				reason = "error"
+			}
+		}
+		r.finishRunLifecycle(ctx, reason)
+	}()
+	if err := r.startRunLifecycle(ctx); err != nil {
+		return TurnResult{StopReason: "error", Err: err}, err
 	}
 	startLen := len(r.Session.Entries())
 
@@ -55,17 +101,23 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 					Data:     base64.StdEncoding.EncodeToString(img.Data),
 				})
 			}
-			r.Session.Append(session.UserMessageWithImagesEntry(userMsg, imgData))
+			r.Session.AppendContext(ctx, session.UserMessageWithImagesEntry(userMsg, imgData))
 		} else {
 			r.Session.Append(session.UserMessageEntry(userMsg))
 		}
 	}
 
 	if ctx.Err() != nil {
-		return r.turnSlice(startLen, true, "aborted", nil, ctx.Err()), nil
+		return r.turnSlice(startLen, true, "aborted", nil, context.Cause(ctx)), nil
 	}
 
-	history := r.Session.View()
+	if err := r.Session.PersistenceError(); err != nil {
+		return r.turnSlice(startLen, true, "error", nil, err), nil
+	}
+	history, imageErr := r.Session.ResolveImages(ctx, r.Session.View())
+	if imageErr != nil {
+		return r.turnSlice(startLen, true, "error", nil, imageErr), nil
+	}
 	msgs := assembleMessages(history)
 	toolDefs := r.Tools.ToolDefs()
 	if r.Permission != nil {
@@ -85,25 +137,31 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	}
 
 	dynamicSuffix := buildDynamicSystemPromptSuffix(r.DynamicIdentityHint, "", kgHint)
+	pinned, pinErr := r.preservedContextPrompt()
+	if pinErr != nil {
+		return r.turnSlice(startLen, true, "error", nil, fmt.Errorf("load context pins: %w", pinErr)), nil
+	}
+	dynamicSuffix += pinned
 	parts := []llm.SystemPromptPart{{Text: r.StaticSystemPrompt, Cache: true}}
 	if dynamicSuffix != "" {
 		parts = append(parts, llm.SystemPromptPart{Text: dynamicSuffix, Cache: false})
 	}
 	req := llm.ChatRequest{
+		Route:             r.Route,
 		Model:             r.Model,
 		Messages:          msgs,
 		Tools:             toolDefs,
-		MaxTokens:         8192,
+		MaxTokens:         r.outputTokenLimit(),
 		SystemPromptParts: parts,
 		CacheLastMessage:  r.providerSupportsCaching(),
 		Reasoning:         r.Reasoning,
 	}
 
-	stream, err := r.LLM.ChatStream(ctx, req)
+	stream, err := r.observeChat(ctx, req, llm.CallGeneration, r.LLM.ChatStream)
 	if err != nil {
 		if r.FallbackModel != "" && r.FallbackModel != req.Model && llm.IsRetryableModelError(err) {
 			req.Model = r.FallbackModel
-			stream, err = r.LLM.ChatStream(ctx, req)
+			stream, err = r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
 		}
 		if err != nil {
 			emit(AgentEvent{Type: EventError, Error: fmt.Errorf("llm error: %w", err)})
@@ -114,13 +172,16 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	var textContent strings.Builder
 	var toolCalls []llm.ToolCall
 	var thinkingBlocks []session.ThinkingBlockData
-	var lastUsage *llm.Usage
 	retriedRefusal := false
 streamLoop:
 	for {
+		toolIDs := make(map[string]bool)
 		var refused bool
 		var refusalCategory string
 		for event := range stream {
+			if event.Type == llm.EventDone || event.Type == llm.EventError {
+				flushUsage()
+			}
 			switch event.Type {
 			case llm.EventTextDelta:
 				textContent.WriteString(event.Text)
@@ -136,20 +197,28 @@ streamLoop:
 				}
 			case llm.EventToolCallDone:
 				if event.ToolCall != nil {
+					if err := acceptToolCallID(toolIDs, event.ToolCall.ID); err != nil {
+						cancelTurn()
+						for range stream {
+						}
+						flushUsage()
+						emit(AgentEvent{Type: EventError, Error: err})
+						return r.turnSlice(startLen, true, "error", ledger.Total(), err), nil
+					}
 					toolCalls = append(toolCalls, *event.ToolCall)
 				}
 			case llm.EventDone:
 				refused = event.StopReason == llm.StopReasonRefusal
 				refusalCategory = event.StopCategory
-				if event.Usage != nil {
-					lastUsage = event.Usage
-				}
 			case llm.EventError:
 				emit(AgentEvent{Type: EventError, Error: event.Error})
-				return r.turnSlice(startLen, true, "error", lastUsage, event.Error), nil
+				return r.turnSlice(startLen, true, "error", ledger.Total(), event.Error), nil
 			}
 		}
 
+		if ctx.Err() != nil {
+			return r.turnSlice(startLen, true, "aborted", ledger.Total(), context.Cause(ctx)), nil
+		}
 		// Same refusal contract as Run: retry once on the fallback model,
 		// else surface a visible explanation instead of empty silence.
 		if refused {
@@ -158,10 +227,10 @@ streamLoop:
 				textContent.Reset()
 				toolCalls = nil
 				req.Model = r.FallbackModel
-				retryStream, retryErr := r.LLM.ChatStream(ctx, req)
+				retryStream, retryErr := r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
 				if retryErr != nil {
 					emit(AgentEvent{Type: EventError, Error: retryErr})
-					return r.turnSlice(startLen, true, "error", lastUsage, retryErr), nil
+					return r.turnSlice(startLen, true, "error", ledger.Total(), retryErr), nil
 				}
 				stream = retryStream
 				continue streamLoop
@@ -200,8 +269,8 @@ streamLoop:
 		if r.KG != nil {
 			r.KG.Ingest(context.Background(), sessionThread(r.Session.View()))
 		}
-		emit(AgentEvent{Type: EventDone, Usage: lastUsage})
-		return r.turnSlice(startLen, true, "completed", lastUsage, nil), nil
+		emit(AgentEvent{Type: EventDone, Usage: ledger.Total()})
+		return r.turnSlice(startLen, true, "completed", ledger.Total(), nil), nil
 	}
 
 	// RunTurn dispatches tool calls serially by design: deterministic
@@ -212,11 +281,11 @@ streamLoop:
 		result, aborted := r.dispatchTool(ctx, tc, nil)
 		emit(AgentEvent{Type: EventToolResult, ToolCall: &tc, Result: &result})
 		if aborted {
-			return r.turnSlice(startLen, true, "aborted", lastUsage, ctx.Err()), nil
+			return r.turnSlice(startLen, true, "aborted", ledger.Total(), context.Cause(ctx)), nil
 		}
 	}
 
-	return r.turnSlice(startLen, false, "continue", lastUsage, nil), nil
+	return r.turnSlice(startLen, false, "continue", ledger.Total(), nil), nil
 }
 
 // turnSlice builds a TurnResult from the entries appended since startLen.

@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
+	"sync"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sausheong/harness/process"
 	"github.com/sausheong/harness/tool"
 )
 
@@ -34,6 +36,10 @@ import (
 // transport must be specified: Command (stdio, the most common) or URL
 // (Streamable HTTP via the SDK's StreamableClientTransport).
 type ServerConfig struct {
+	// Optional permits construction to continue when this server fails.
+	Optional bool
+	// ConnectTimeout bounds this server; optional servers default to five seconds.
+	ConnectTimeout time.Duration
 	// Name namespaces the server's tools. Adapter tool names become
 	// "mcp__<Name>__<tool>" — the conventional double-underscore
 	// scheme that prevents collisions with built-in tools.
@@ -71,16 +77,20 @@ type ServerConfig struct {
 // Client is a connected MCP server with its discovered tools adapted as
 // harness tool.Tool implementations.
 type Client struct {
-	name    string
-	session *sdk.ClientSession
-	tools   []tool.Tool
-	closed  bool
+	name      string
+	session   *sdk.ClientSession
+	tools     []tool.Tool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Connect opens a session to the MCP server in cfg, lists its tools,
 // and adapts each into a tool.Tool. Returned Client owns the session;
 // call Close to release it.
 func Connect(ctx context.Context, cfg ServerConfig) (*Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("mcp: ServerConfig.Name is required")
 	}
@@ -135,11 +145,8 @@ func (c *Client) Ping(ctx context.Context) error {
 // Close releases the underlying MCP session. Safe to call multiple
 // times — subsequent calls are no-ops.
 func (c *Client) Close() error {
-	if c.closed {
-		return nil
-	}
-	c.closed = true
-	return c.session.Close()
+	c.closeOnce.Do(func() { c.closeErr = c.session.Close() })
+	return c.closeErr
 }
 
 // buildTransport selects a transport based on cfg. stdio uses
@@ -149,9 +156,9 @@ func (c *Client) Close() error {
 // applied via wrapHTTPClient.
 func buildTransport(cfg ServerConfig) (sdk.Transport, error) {
 	if cfg.Command != "" {
-		cmd := exec.Command(cfg.Command, cfg.Args...)
+		cmd := process.Command(context.Background(), cfg.Command, cfg.Args...)
 		cmd.Env = mergeEnv(os.Environ(), cfg.Env)
-		return &sdk.CommandTransport{Command: cmd}, nil
+		return &managedCommandTransport{CommandTransport: sdk.CommandTransport{Command: cmd, TerminateDuration: 250 * time.Millisecond}}, nil
 	}
 	return &sdk.StreamableClientTransport{
 		Endpoint:   cfg.URL,

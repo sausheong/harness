@@ -4,16 +4,15 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
 )
 
 // MaxConsecutiveFailures is the per-session circuit-breaker threshold.
-// After this many consecutive autocompact attempts that drop to the
-// placeholder stage (stage 3), MaybeCompact stops attempting compaction
+// After this many consecutive failed autocompact attempts, MaybeCompact stops attempting compaction
 // for the session and returns Skipped="circuit_breaker".
 //
 // The breaker resets on any genuine summarizer success (stage 1 or 2
@@ -34,6 +33,8 @@ const (
 // false, Skipped names the reason ("too_short", "empty_summary",
 // "ollama_down", "model_missing", "timeout", "summarizer_error").
 type Result struct {
+	Requests []llm.RequestUsage
+
 	Compacted      bool
 	Reason         Reason
 	Skipped        string
@@ -46,7 +47,23 @@ type Result struct {
 
 // Manager orchestrates compaction for sessions. One Manager is shared across
 // the whole agent runtime; it tracks per-session mutexes internally.
+type CommitNotification struct {
+	SessionID      string
+	Reason         Reason
+	TurnsCompacted int
+	TokensBefore   int
+	TokensAfter    int
+}
+
 type Manager struct {
+	// OnCommitted observes a successfully committed compaction after its lock is released.
+	// Configure while idle; callbacks must honour their bounded context. Panics are contained.
+	OnCommitted func(context.Context, CommitNotification)
+
+	// OnUsage receives compaction attempt records, including background work.
+	// The callback must be concurrency-safe and must not mutate records.
+	OnUsage func(llm.RequestUsage)
+
 	Summarizer    *Summarizer
 	PreserveTurns int     // K; default 4 if zero
 	Threshold     float64 // fraction of context window that triggers preventive compaction (e.g. 0.6); 0 means use caller default
@@ -65,13 +82,14 @@ type Manager struct {
 	// mutexes so awaiting an in-flight compaction (WaitForInFlight)
 	// never serializes on the per-session lock-map or failure-counter.
 	inFlightMu sync.Mutex
-	inFlight   map[string]*inFlightCompaction // session.ID → in-flight handle
+	inFlight   map[string]*inFlightCompaction // stable session key → active or unconsumed handle
 }
 
 // inFlightCompaction tracks a background compaction goroutine spawned
 // via MaybeCompactAsync. The done channel is closed when the goroutine
 // returns; result holds the outcome for any waiter that wants it.
 type inFlightCompaction struct {
+	cancel context.CancelFunc
 	done   chan struct{}
 	result Result
 	err    error
@@ -90,11 +108,32 @@ type inFlightCompaction struct {
 // will block until the first completes. This is intentional — it prevents
 // two compactions from racing on session.Append — but callers triggering
 // manual compactions while a preventive one is in flight should expect a wait.
-func (m *Manager) MaybeCompact(ctx context.Context, sess *session.Session, reason Reason, instructions string) (Result, error) {
+func (m *Manager) MaybeCompact(ctx context.Context, sess *session.Session, reason Reason, instructions string) (result Result, resultErr error) {
+	ledger := &llm.UsageLedger{}
+	ctx = llm.WithUsageObserver(ctx, func(record llm.RequestUsage) {
+		ledger.Record(record)
+		if m != nil && m.OnUsage != nil {
+			m.OnUsage(record)
+		}
+	})
+	defer func() { result.Requests = ledger.Records() }()
+
 	if m == nil || m.Summarizer == nil {
 		return Result{Reason: reason, Skipped: "no_summarizer"}, nil
 	}
 
+	defer func() {
+		if resultErr == nil && result.Compacted && m.OnCommitted != nil {
+			observerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					slog.Warn("compaction observer panicked")
+				}
+			}()
+			m.OnCommitted(observerCtx, CommitNotification{sess.ID, result.Reason, result.TurnsCompacted, result.TokensBefore, result.TokensAfter})
+		}
+	}()
 	key := stableKey(sess)
 	if fc := m.failureCount(key); fc >= MaxConsecutiveFailures {
 		slog.Info("compaction skipped",
@@ -124,27 +163,20 @@ func (m *Manager) MaybeCompact(ctx context.Context, sess *session.Session, reaso
 
 	slog.Info("compaction triggered", "session_id", sess.ID, "reason", string(reason))
 
-	summary, err := m.Summarizer.Summarize(ctx, toCompact, instructions)
+	combined, err := guidanceFor(ctx, instructions)
+	if err != nil {
+		return Result{Reason: reason, Skipped: "invalid_guidance"}, err
+	}
+	summary, err := m.Summarizer.Summarize(ctx, toCompact, combined)
 	if err != nil {
 		skipReason := classifySummarizerError(err)
 		slog.Warn("compaction skipped", "session_id", sess.ID, "reason", string(reason), "skipped", skipReason, "detail", err.Error())
-		// A hard error from Summarize means even stage 3 didn't run.
-		// Count it as a failure for breaker accounting.
+		// Leave both raw and effective history unchanged on summarizer failure.
 		m.incrementFailure(key)
 		return Result{Reason: reason, Skipped: skipReason}, nil
 	}
 
-	// summarizeWithFallback's stage 3 returns a placeholder summary
-	// (no error) when both stage 1 and stage 2 failed. We detect
-	// placeholders by their stable marker phrase and treat them as
-	// failures for breaker accounting; real (stage-1 or stage-2)
-	// summaries reset the counter.
-	isPlaceholder := strings.Contains(summary, "compaction failed and the summary could not be generated")
-	if isPlaceholder {
-		m.incrementFailure(key)
-	} else {
-		m.resetFailures(key)
-	}
+	m.resetFailures(key)
 
 	first := toCompact[0]
 	last := toCompact[len(toCompact)-1]
@@ -156,14 +188,8 @@ func (m *Manager) MaybeCompact(ctx context.Context, sess *session.Session, reaso
 	// compaction at the leaf and View() would terminate on it immediately,
 	// silently dropping every preserved turn.
 	entry.ParentID = toPreserve[0].ParentID
-	sess.Append(entry)
-	for i, e := range toPreserve {
-		if i == 0 {
-			e.ParentID = entry.ID
-		}
-		// Re-append with same ID — Session.Append's entryMap overwrite and
-		// the loader's last-write-wins behaviour both make this safe.
-		sess.Append(e)
+	if err := sess.CommitCompaction(view[len(view)-1].ID, entry, toPreserve); err != nil {
+		return Result{}, err
 	}
 
 	dur := time.Since(start).Milliseconds()
@@ -197,6 +223,18 @@ func (m *Manager) MaybeCompact(ctx context.Context, sess *session.Session, reaso
 // enough for the three-stage fallback path) so that a returning
 // caller's cancellation can't kill the in-flight summary.
 func (m *Manager) MaybeCompactAsync(sess *session.Session, reason Reason) <-chan struct{} {
+	return m.maybeCompactAsync(context.Background(), sess, reason, false)
+}
+
+// MaybeCompactAsyncContext retains caller cancellation and usage observation.
+// Its completed result remains available until JoinInFlight or ForgetSession;
+// another launch for this session returns the existing handle until then.
+// Callers must join before releasing ownership, including on error paths.
+func (m *Manager) MaybeCompactAsyncContext(parent context.Context, sess *session.Session, reason Reason) <-chan struct{} {
+	return m.maybeCompactAsync(parent, sess, reason, true)
+}
+
+func (m *Manager) maybeCompactAsync(parent context.Context, sess *session.Session, reason Reason, retainResult bool) <-chan struct{} {
 	if m == nil || m.Summarizer == nil || sess == nil {
 		ch := make(chan struct{})
 		close(ch)
@@ -211,27 +249,26 @@ func (m *Manager) MaybeCompactAsync(sess *session.Session, reason Reason) <-chan
 	if m.inFlight == nil {
 		m.inFlight = make(map[string]*inFlightCompaction)
 	}
-	fl := &inFlightCompaction{done: make(chan struct{})}
-	m.inFlight[key] = fl
-	m.inFlightMu.Unlock()
-
 	timeout := m.Summarizer.Timeout
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
+	ctx, cancel := context.WithTimeout(parent, 2*timeout)
+	fl := &inFlightCompaction{done: make(chan struct{}), cancel: cancel}
+	m.inFlight[key] = fl
+	m.inFlightMu.Unlock()
+
 	go func() {
-		defer close(fl.done)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*timeout)
-		defer cancel()
-		res, err := m.MaybeCompact(ctx, sess, reason, "")
-		fl.result = res
-		fl.err = err
-		// Drop our entry from the map so a subsequent burst can fire a
-		// fresh compaction (the next turn's WaitForInFlight will see no
-		// entry and proceed straight to its own threshold check).
-		m.inFlightMu.Lock()
-		delete(m.inFlight, key)
-		m.inFlightMu.Unlock()
+		defer func() {
+			cancel()
+			m.inFlightMu.Lock()
+			close(fl.done)
+			if !retainResult && m.inFlight[key] == fl {
+				delete(m.inFlight, key)
+			}
+			m.inFlightMu.Unlock()
+		}()
+		fl.result, fl.err = m.MaybeCompact(ctx, sess, reason, "")
 	}()
 	return fl.done
 }
@@ -281,8 +318,16 @@ func (m *Manager) HasInFlight(sess *session.Session) bool {
 	key := stableKey(sess)
 	m.inFlightMu.Lock()
 	defer m.inFlightMu.Unlock()
-	_, ok := m.inFlight[key]
-	return ok
+	fl, ok := m.inFlight[key]
+	if !ok {
+		return false
+	}
+	select {
+	case <-fl.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // ForgetSession removes the per-session lock, failure counter, and
@@ -300,6 +345,9 @@ func (m *Manager) ForgetSession(sess *session.Session) {
 	if m == nil || sess == nil {
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.JoinInFlight(ctx, sess)
 	key := stableKey(sess)
 	m.mu.Lock()
 	delete(m.locks, key)
@@ -307,9 +355,7 @@ func (m *Manager) ForgetSession(sess *session.Session) {
 	m.failMu.Lock()
 	delete(m.failures, key)
 	m.failMu.Unlock()
-	// Drop any in-flight tracking entry too. The goroutine itself
-	// already deletes its entry on completion; this covers the rare
-	// case of a session being forgotten mid-compaction.
+	// Clear tracking after joining; the owner must prevent concurrent launches.
 	m.inFlightMu.Lock()
 	delete(m.inFlight, key)
 	m.inFlightMu.Unlock()
@@ -388,4 +434,32 @@ func classifySummarizerError(err error) string {
 		// More specific classification can come later.
 		return "summarizer_error"
 	}
+}
+
+// JoinInFlight waits for and consumes the current background producer, returning its result
+// and error. Cancellation cancels that producer, then still waits for it to
+// finish; it never reports a join while session writes can continue. Callers
+// must prevent concurrent new launches while ending session ownership.
+func (m *Manager) JoinInFlight(ctx context.Context, sess *session.Session) (Result, bool, error) {
+	if m == nil || sess == nil {
+		return Result{}, false, nil
+	}
+	m.inFlightMu.Lock()
+	fl, ok := m.inFlight[stableKey(sess)]
+	m.inFlightMu.Unlock()
+	if !ok {
+		return Result{}, false, nil
+	}
+	select {
+	case <-fl.done:
+	case <-ctx.Done():
+		fl.cancel()
+		<-fl.done
+	}
+	m.inFlightMu.Lock()
+	if m.inFlight[stableKey(sess)] == fl {
+		delete(m.inFlight, stableKey(sess))
+	}
+	m.inFlightMu.Unlock()
+	return fl.result, true, fl.err
 }

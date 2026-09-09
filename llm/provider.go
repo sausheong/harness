@@ -152,7 +152,17 @@ func ParseReasoningMode(s string) (ReasoningMode, error) {
 }
 
 // ChatRequest is the input to a streaming chat call.
+// CallRoute identifies the constructed provider client for local admission and
+// accounting. It is not sent to the provider. Destination must distinguish
+// custom endpoints from explicitly named provider defaults.
+type CallRoute struct {
+	Provider    string `json:"provider"`
+	Destination string `json:"destination"`
+}
+
 type ChatRequest struct {
+	Route CallRoute `json:"-"`
+
 	Model       string
 	Messages    []Message
 	Tools       []ToolDef
@@ -181,6 +191,8 @@ type ChatRequest struct {
 }
 
 // Usage tracks token usage.
+// InputTokens is total input including cached input. Cache counters are
+// subsets used for pricing/analysis and must not be added again for context.
 type Usage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`

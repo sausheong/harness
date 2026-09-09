@@ -58,37 +58,26 @@ func TestSummarizerTrimsWhitespace(t *testing.T) {
 	assert.Equal(t, "summary text", got)
 }
 
-func TestSummarizerEmptyResponseFallsBackToPlaceholder(t *testing.T) {
-	// An empty model response is no longer surfaced as ErrEmptySummary —
-	// the three-stage fallback chain catches it: stage 1 returns
-	// ErrEmptySummary internally, stage 2 is skipped (not an overflow or
-	// stream error), stage 3 emits the placeholder. The underlying
-	// ErrEmptySummary remains the failure mode that callOnce reports
-	// inside the chain; the user-facing contract is "always returns a
-	// usable summary string, never an error".
+func TestSummarizerEmptyResponseReturnsError(t *testing.T) {
 	s := &Summarizer{
 		Provider: &fakeProvider{text: "   \n  "},
 		Model:    "qwen2.5:3b-instruct",
 		Timeout:  5 * time.Second,
 	}
 	got, err := s.Summarize(context.Background(), []session.SessionEntry{session.UserMessageEntry("hi")}, "")
-	require.NoError(t, err)
-	assert.Contains(t, got, "compaction failed")
+	require.Error(t, err)
+	assert.Empty(t, got)
 }
 
-func TestSummarizerProviderErrorFallsBackToPlaceholder(t *testing.T) {
-	// A provider-level ChatStream error is wrapped as
-	// "compaction: chat stream: <err>" — neither an overflow nor a
-	// stream-event error, so stage 2 is skipped and we fall straight
-	// through to the placeholder. The agent loop sees no error.
+func TestSummarizerProviderErrorReturnsError(t *testing.T) {
 	s := &Summarizer{
 		Provider: &fakeProvider{err: errors.New("ollama down")},
 		Model:    "qwen2.5:3b-instruct",
 		Timeout:  5 * time.Second,
 	}
 	got, err := s.Summarize(context.Background(), []session.SessionEntry{session.UserMessageEntry("hi")}, "")
-	require.NoError(t, err)
-	assert.Contains(t, got, "compaction failed")
+	require.Error(t, err)
+	assert.Empty(t, got)
 }
 
 // flakyProvider returns ChatStream errors a configured number of times,
@@ -153,7 +142,7 @@ func TestSummarizeFallbackToSmallOnlyOnOverflow(t *testing.T) {
 		"second-stage success must produce the summary")
 }
 
-func TestSummarizeFallbackToPlaceholderWhenAllStagesFail(t *testing.T) {
+func TestSummarizeReturnsErrorWhenAllStagesFail(t *testing.T) {
 	entries := []session.SessionEntry{session.UserMessageEntry("hi")}
 	s := &Summarizer{
 		Provider: &flakyProvider{failsRemaining: 99, successText: ""},
@@ -161,12 +150,8 @@ func TestSummarizeFallbackToPlaceholderWhenAllStagesFail(t *testing.T) {
 		Timeout:  time.Second,
 	}
 	got, err := s.Summarize(context.Background(), entries, "")
-	require.NoError(t, err,
-		"placeholder stage must not surface the underlying error to caller")
-	assert.Contains(t, got, "Conversation history",
-		"placeholder must be a usable summary stub")
-	assert.Contains(t, got, "compaction failed",
-		"placeholder must indicate the failure so the next turn can adapt")
+	require.Error(t, err)
+	assert.Empty(t, got)
 }
 
 func TestSummarizePerCallTimeoutPropagates(t *testing.T) {

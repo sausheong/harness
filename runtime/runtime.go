@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sausheong/harness/budget"
 	"github.com/sausheong/harness/compaction"
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/session"
@@ -31,10 +33,13 @@ const (
 	EventCompactionStart
 	EventCompactionDone
 	EventCompactionSkipped
+	EventRequestUsage
 )
 
 // AgentEvent is a single streaming event from the agent.
 type AgentEvent struct {
+	RequestUsage *llm.RequestUsage // one provider attempt, independent of cumulative Usage
+
 	Type EventType
 	// AgentID is the emitter's agent identifier. Empty for top-level
 	// (Parent==nil) runtimes; populated by Runtime.emit when forwarding a
@@ -45,11 +50,14 @@ type AgentEvent struct {
 	Result     *tool.ToolResult
 	Error      error
 	Compaction *compaction.Result // populated for EventCompaction* events
-	Usage      *llm.Usage         // on the terminal EventDone, the token total accumulated across all turns of the run (nil if the provider never reported usage); per-turn figures are available via RunTurn's TurnResult.Usage
+	Usage      *llm.Usage         // reported-only cumulative consumption on EventRequestUsage/EventDone; see USAGE.md for unknown attempts and compaction
 }
 
 // Runtime is the agent think-act loop.
 type Runtime struct {
+	// Route identifies the client in LLM for admission; update atomically with it.
+	Route llm.CallRoute
+
 	LLM       llm.LLMProvider
 	Tools     tool.Executor
 	Session   *session.Session
@@ -79,6 +87,8 @@ type Runtime struct {
 
 	// ContextWindow overrides the auto-detected window. 0 = auto-detect.
 	ContextWindow int
+	// MaxOutputTokens bounds each generation request. Zero retains the 8192 default.
+	MaxOutputTokens int
 
 	// StaticSystemPrompt is the cacheable portion of the system prompt.
 	// Built once at BuildRuntime time; reused verbatim every turn so the
@@ -144,7 +154,12 @@ type Runtime struct {
 	// mcpClients holds the MCP client sessions resolved from
 	// AgentSpec.MCPServers. Released by Close. Untouched when MCP is
 	// not used.
-	mcpClients []*mcp.Client
+	mcpClients        []*mcp.Client
+	mcpMu             sync.Mutex
+	mcpClosed         bool
+	refreshToolPrompt func([]string) string
+	contextSources    func() []ContextSource
+	mcpStatus         []MCPServerStatus
 
 	// runMu enforces the Runtime contract that one session exchange runs at a
 	// time. TryLock lets a second caller receive a normal error instead of
@@ -159,6 +174,9 @@ type Runtime struct {
 // Returns the first Close error encountered, if any; remaining
 // clients are still closed.
 func (r *Runtime) Close() error {
+	r.mcpMu.Lock()
+	defer r.mcpMu.Unlock()
+	r.mcpClosed = true
 	var firstErr error
 	for _, c := range r.mcpClients {
 		if err := c.Close(); err != nil && firstErr == nil {
@@ -187,7 +205,7 @@ func (r *Runtime) emit(ev AgentEvent) {
 // maybeKickoffAsyncCompaction conditionally fires Compaction.MaybeCompactAsync
 // when the just-finished turn left the session close enough to the trigger
 // threshold that the NEXT turn would compact synchronously.
-func (r *Runtime) maybeKickoffAsyncCompaction(msgs []llm.Message, parts []llm.SystemPromptPart, toolDefs []llm.ToolDef) {
+func (r *Runtime) maybeKickoffAsyncCompaction(ctx context.Context, msgs []llm.Message, parts []llm.SystemPromptPart, toolDefs []llm.ToolDef) {
 	if r.Compaction == nil || r.Model == "" {
 		return
 	}
@@ -209,7 +227,7 @@ func (r *Runtime) maybeKickoffAsyncCompaction(msgs []llm.Message, parts []llm.Sy
 	if !preemptThresholdHit && !preemptCountHit {
 		return
 	}
-	r.Compaction.MaybeCompactAsync(r.Session, compaction.ReasonPreventive)
+	r.Compaction.MaybeCompactAsyncContext(ctx, r.Session, compaction.ReasonPreventive)
 }
 
 // providerSupportsCaching returns true when the runtime's provider implements
@@ -290,18 +308,75 @@ func isFileTool(name string) bool {
 
 // Run executes the agent loop for a user message, returning a channel of events.
 func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageContent) (<-chan AgentEvent, error) {
+	if r.MaxOutputTokens < 0 {
+		return nil, fmt.Errorf("max output tokens cannot be negative")
+	}
 	if !r.runMu.TryLock() {
 		return nil, fmt.Errorf("runtime is already running")
 	}
+	guidance, guidanceErr := r.preservedContextPrompt()
+	if guidanceErr != nil {
+		r.runMu.Unlock()
+		return nil, guidanceErr
+	}
+	ctx, guidanceErr = compaction.WithGuidance(ctx, guidance)
+	if guidanceErr != nil {
+		r.runMu.Unlock()
+		return nil, guidanceErr
+	}
+	ctx, guidanceErr = r.budgetContext(ctx)
+	if guidanceErr != nil {
+		r.runMu.Unlock()
+		return nil, guidanceErr
+	}
+	ctx, deadlineCancel, deadlineErr := budget.WithDeadline(ctx, r.Session)
+	if deadlineErr != nil {
+		r.runMu.Unlock()
+		return nil, deadlineErr
+	}
+	ctx, cancelRun := context.WithCancelCause(ctx)
 	events := make(chan AgentEvent, 100)
 	r.events = events
+	ledger := &llm.UsageLedger{}
+	ctx = llm.WithUsageObserver(ctx, func(record llm.RequestUsage) {
+		ledger.Record(record)
+		r.emit(AgentEvent{Type: EventRequestUsage, RequestUsage: &record, Usage: ledger.Total()})
+	})
 	tr := TraceFrom(ctx)
 	tr.Mark("agent.run.start", "user_msg_len", len(userMsg), "images", len(images))
 
 	go func() {
+		completed := false
 		defer close(events)
+		defer deadlineCancel()
+		defer cancelRun(nil)
 		defer r.runMu.Unlock()
 		defer tr.Summary()
+		// Registered before stop hooks so their deferred work runs before the
+		// final producer join and persistence fence. Events stays open throughout.
+		defer func() {
+			result, joined, err := r.Compaction.JoinInFlight(ctx, r.Session)
+			if joined {
+				kind := EventCompactionSkipped
+				if result.Compacted {
+					kind = EventCompactionDone
+				}
+				r.emit(AgentEvent{Type: kind, Compaction: &result})
+			}
+			if r.Session != nil {
+				err = errors.Join(err, r.Session.Flush())
+			}
+			if err != nil {
+				r.emit(AgentEvent{Type: EventError, Error: err})
+			}
+			if completed {
+				if ctx.Err() != nil {
+					r.emit(abortedEvent(ctx))
+				} else if err == nil {
+					r.emit(AgentEvent{Type: EventDone, Usage: ledger.Total()})
+				}
+			}
+		}()
 
 		// Flush the per-session calibrator once at Run end (all exit paths:
 		// normal, error, abort) instead of writing to disk on every LLM
@@ -320,6 +395,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 		// so the natural fall-through (loop exhausted MaxTurns) records the
 		// right reason without an explicit assignment at that exit.
 		stopReason := "max_turns"
+		defer func() { r.finishRunLifecycle(ctx, stopReason) }()
 		if hook := r.AgentLoop.Hooks.OnStop; hook != nil {
 			defer func() { callOnStopHook(ctx, hook, stopReason) }()
 		}
@@ -330,6 +406,12 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				r.emit(AgentEvent{Type: EventError, Error: err})
 			}
 		}()
+
+		if err := r.startRunLifecycle(ctx); err != nil {
+			stopReason = "error"
+			r.emit(AgentEvent{Type: EventError, Error: err})
+			return
+		}
 
 		// OnUserPromptSubmit may rewrite prompt and/or images BEFORE the
 		// session sees them. Returning err aborts Run with EventError.
@@ -352,9 +434,15 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					Data:     base64.StdEncoding.EncodeToString(img.Data),
 				})
 			}
-			r.Session.Append(session.UserMessageWithImagesEntry(userMsg, imgData))
+			r.Session.AppendContext(ctx, session.UserMessageWithImagesEntry(userMsg, imgData))
 		} else {
 			r.Session.Append(session.UserMessageEntry(userMsg))
+		}
+
+		if err := r.Session.PersistenceError(); err != nil {
+			stopReason = "error"
+			r.emit(AgentEvent{Type: EventError, Error: err})
+			return
 		}
 
 		if hook := r.AgentLoop.Hooks.OnSessionStart; hook != nil {
@@ -424,12 +512,16 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				"reason", d.Reason)
 		}
 
-		var runUsage *llm.Usage // accumulated across all turns; nil until first reported
-
 		for turn := 0; turn < maxTurns; turn++ {
+			if err := r.Session.PersistenceError(); err != nil {
+				stopReason = "error"
+				r.emit(AgentEvent{Type: EventError, Error: err})
+				return
+			}
+
 			if ctx.Err() != nil {
 				stopReason = "aborted"
-				r.emit(AgentEvent{Type: EventAborted})
+				r.emit(abortedEvent(ctx))
 				return
 			}
 
@@ -451,7 +543,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			}
 
 			dynamicSuffix := buildDynamicSystemPromptSuffix(r.DynamicIdentityHint, dateLine, kgContext)
+			pinned, pinErr := r.preservedContextPrompt()
+			if pinErr != nil {
+				r.emit(AgentEvent{Type: EventError, Error: fmt.Errorf("load context pins: %w", pinErr)})
+				return
+			}
+			dynamicSuffix += pinned
 
+			// Tool execution from the previous round has joined here. Refresh
+			// self-authored skills before assembling the next model request.
+			if r.Skills != nil {
+				r.refreshSkills()
+			}
 			staticText := r.StaticSystemPrompt
 			parts := []llm.SystemPromptPart{
 				{Text: staticText, Cache: true},
@@ -460,7 +563,12 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				parts = append(parts, llm.SystemPromptPart{Text: dynamicSuffix, Cache: false})
 			}
 
-			history := r.Session.View()
+			history, imageErr := r.Session.ResolveImages(ctx, r.Session.View())
+			if imageErr != nil {
+				stopReason = "error"
+				r.emit(AgentEvent{Type: EventError, Error: imageErr})
+				return
+			}
 			msgs := assembleMessages(history)
 
 			spillCfg := spillConfig{Workspace: r.Workspace, SessionKey: r.Session.Key}
@@ -510,10 +618,11 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			}
 
 			req := llm.ChatRequest{
+				Route:             r.Route,
 				Model:             r.Model,
 				Messages:          msgs,
 				Tools:             toolDefs,
-				MaxTokens:         8192,
+				MaxTokens:         r.outputTokenLimit(),
 				SystemPromptParts: parts,
 				CacheLastMessage:  r.providerSupportsCaching(),
 				Reasoning:         r.Reasoning,
@@ -525,7 +634,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				prefillChars += len(m.Content)
 			}
 			tr.Mark("llm.request_sent", "turn", turn, "model", r.Model, "prefill_chars", prefillChars)
-			stream, err := r.LLM.ChatStream(ctx, req)
+			stream, err := r.observeChat(ctx, req, llm.CallGeneration, r.LLM.ChatStream)
 			if err != nil {
 				if compaction.IsContextOverflow(err) && r.Compaction != nil {
 					r.emit(AgentEvent{Type: EventCompactionStart})
@@ -537,7 +646,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.prune(msgs, spillCfg)
 						msgs = prependPostCompactRestore(msgs, r.snapshotTouchedFiles())
 						req.Messages = msgs
-						stream, err = r.LLM.ChatStream(ctx, req)
+						stream, err = r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
 					} else {
 						r.emit(AgentEvent{Type: EventCompactionSkipped, Compaction: &res})
 					}
@@ -550,7 +659,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						"err", err.Error())
 					tr.Mark("llm.fallback", "turn", turn, "primary", req.Model, "fallback", r.FallbackModel)
 					req.Model = r.FallbackModel
-					stream, err = r.LLM.ChatStream(ctx, req)
+					stream, err = r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
 				}
 				if err != nil {
 					stopReason = "error"
@@ -564,7 +673,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			var thinkingBlocks []session.ThinkingBlockData
 			gotFirstToken := false
 
-			streamingOn := r.streamingToolsEnabled()
+			streamingOn := r.streamingToolsEnabled() && steeringSource(ctx) == nil
 			kickoffs := map[string]chan kickoffResult{}
 			kickoffStopped := false
 
@@ -576,6 +685,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			var refusalCategory string
 		streamLoop:
 			for {
+				toolIDs := make(map[string]bool)
 				for event := range streamSource {
 					switch event.Type {
 					case llm.EventTextDelta:
@@ -606,6 +716,13 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							continue
 						}
 						tc := *event.ToolCall
+						if err := acceptToolCallID(toolIDs, tc.ID); err != nil {
+							cancelRun(err)
+							// Join usage settlement before the runtime event channel closes.
+							for range streamSource {
+							}
+							break streamLoop
+						}
 						toolCalls = append(toolCalls, tc)
 						if !streamingOn || kickoffStopped {
 							continue
@@ -626,9 +743,6 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					case llm.EventDone:
 						refused = event.StopReason == llm.StopReasonRefusal
 						refusalCategory = event.StopCategory
-						if event.Usage != nil {
-							runUsage = addUsage(runUsage, event.Usage)
-						}
 						if event.Usage != nil && r.calibrator != nil {
 							// Recompute the estimate on the CURRENT msgs (which may
 							// have been reassembled by mid-turn compaction) so the
@@ -641,6 +755,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						}
 
 					case llm.EventError:
+						// Once tools have started, replaying the provider call can
+						// repeat external effects. Stop owned work and reconcile
+						// its results below before returning the original cause.
+						if len(kickoffs) > 0 || ctx.Err() != nil || errors.Is(event.Error, budget.ErrExhausted) {
+							cancelRun(event.Error)
+							if len(toolCalls) > 0 {
+								break streamLoop
+							}
+							stopReason = "error"
+							r.emit(AgentEvent{Type: EventError, Error: event.Error})
+							return
+						}
 						if !gotFirstToken && !preTokenRetried {
 							if newStream, ok := r.recoverFromPreTokenError(ctx, event.Error, &req, &msgs, spillCfg); ok {
 								preTokenRetried = true
@@ -664,7 +790,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 								kickoffs = map[string]chan kickoffResult{}
 								gotFirstToken = false
 								kickoffStopped = false
-								nsStream, retryErr := ns.ChatNonStreaming(ctx, req)
+								nsStream, retryErr := r.observeChat(ctx, req, llm.CallRetry, ns.ChatNonStreaming)
 								if retryErr != nil {
 									stopReason = "error"
 									r.emit(AgentEvent{Type: EventError, Error: retryErr})
@@ -680,6 +806,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						r.emit(AgentEvent{Type: EventError, Error: event.Error})
 						return
 					}
+				}
+
+				if ctx.Err() != nil {
+					if len(toolCalls) > 0 {
+						// Reconcile started tools below before closing events;
+						// cancellation must not discard their session pairs.
+						break streamLoop
+					}
+					drainKickoffs(kickoffs)
+					stopReason = "aborted"
+					r.emit(abortedEvent(ctx))
+					return
 				}
 
 				// Classifier/model refusal (Claude Fable 5+): HTTP 200,
@@ -708,7 +846,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						refused = false
 						retriedRefusal = true
 						req.Model = r.FallbackModel
-						retryStream, retryErr := r.LLM.ChatStream(ctx, req)
+						retryStream, retryErr := r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
 						if retryErr != nil {
 							stopReason = "error"
 							r.emit(AgentEvent{Type: EventError, Error: retryErr})
@@ -752,83 +890,83 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				}
 			}
 
+			if steered, err := r.applySteering(ctx, toolCalls); err != nil {
+				stopReason = "error"
+				r.emit(AgentEvent{Type: EventError, Error: err})
+				return
+			} else if steered {
+				continue
+			}
+
+			if ctx.Err() != nil && len(toolCalls) == 0 {
+				stopReason = "aborted"
+				r.emit(abortedEvent(ctx))
+				return
+			}
 			if len(toolCalls) == 0 {
 				if len(kickoffs) > 0 {
 					drainKickoffs(kickoffs)
 				}
 				tr.Mark("agent.done", "turn", turn, "reason", "no_tool_calls")
+				if err := r.Session.Flush(); err != nil {
+					stopReason = "error"
+					r.emit(AgentEvent{Type: EventError, Error: err})
+					return
+				}
 				stopReason = "completed"
-				r.emit(AgentEvent{Type: EventDone, Usage: runUsage})
-				r.maybeKickoffAsyncCompaction(msgs, parts, toolDefs)
+				completed = true
+				r.maybeKickoffAsyncCompaction(ctx, msgs, parts, toolDefs)
 				return
 			}
 
 			var pending []llm.ToolCall
+			var reconcileErr error
 			for _, tc := range toolCalls {
 				if ch, ok := kickoffs[tc.ID]; ok {
 					kp := <-ch
-					r.Session.Append(session.ToolCallEntry(kp.tc.ID, kp.tc.Name, kp.tc.Input))
-					if r.KG != nil {
-						r.kgMu.Lock()
-						thread = append(thread, Message{
-							Role:    "assistant",
-							Content: fmt.Sprintf("[tool: %s]\n%s", kp.tc.Name, string(kp.tc.Input)),
-						})
-						r.kgMu.Unlock()
-					}
-					if kp.aborted {
-						r.Session.Append(session.AbortedToolResultEntry(kp.tc.ID))
-						if r.KG != nil {
-							r.kgMu.Lock()
-							thread = append(thread, Message{Role: "user", Content: "[error] aborted by user"})
-							r.kgMu.Unlock()
-						}
-						for _, tc2 := range toolCalls {
-							if tc2.ID == kp.tc.ID {
-								continue
-							}
-							ch2, ok := kickoffs[tc2.ID]
-							if !ok {
-								continue
-							}
-							kp2 := <-ch2
-							r.Session.Append(session.ToolCallEntry(kp2.tc.ID, kp2.tc.Name, kp2.tc.Input))
-							r.Session.Append(session.AbortedToolResultEntry(kp2.tc.ID))
-							if r.KG != nil {
-								r.kgMu.Lock()
-								thread = append(thread, Message{
-									Role:    "assistant",
-									Content: fmt.Sprintf("[tool: %s]\n%s", kp2.tc.Name, string(kp2.tc.Input)),
-								})
-								thread = append(thread, Message{Role: "user", Content: "[error] aborted by user"})
-								r.kgMu.Unlock()
-							}
-						}
-						stopReason = "aborted"
-						r.emit(AgentEvent{Type: EventAborted})
-						return
-					}
-					imgData := convertToolResultImages(kp.result.Images)
-					r.Session.Append(session.ToolResultEntry(kp.tc.ID, kp.result.Output, kp.result.Error, imgData))
-					if r.KG != nil {
-						content := kp.result.Output
-						if kp.result.Error != "" {
-							content = "[error] " + kp.result.Error
-						}
-						r.kgMu.Lock()
-						thread = append(thread, Message{Role: "user", Content: content})
-						r.kgMu.Unlock()
-					}
-					continue
+					delete(kickoffs, tc.ID)
+					reconcileErr = errors.Join(reconcileErr, r.persistKickoff(ctx, kp, kgThreadOrNil(r.KG, &thread)))
+				} else {
+					pending = append(pending, tc)
 				}
-				pending = append(pending, tc)
+			}
+			if ctx.Err() != nil || reconcileErr != nil {
+				// Calls emitted by the provider but not started must remain
+				// paired too. Never invoke their permission hooks or tools.
+				for _, tc := range pending {
+					kp := kickoffResult{tc: tc, aborted: true}
+					reconcileErr = errors.Join(reconcileErr, r.persistKickoff(ctx, kp, kgThreadOrNil(r.KG, &thread)))
+				}
+				stopReason = "aborted"
+				if reconcileErr != nil {
+					r.emit(AgentEvent{Type: EventError, Error: errors.Join(context.Cause(ctx), reconcileErr)})
+				} else {
+					r.emit(abortedEvent(ctx))
+				}
+				return
 			}
 
 			batches := partitionToolCalls(pending, r.Tools)
-			for _, b := range batches {
+			if steeringSource(ctx) != nil {
+				batches = nil
+				for _, tc := range pending {
+					batches = append(batches, batch{calls: []llm.ToolCall{tc}})
+				}
+			}
+			for i, b := range batches {
+				// The first boundary was checked immediately after model output.
+				if i > 0 {
+					if steered, err := r.applySteering(ctx, pending[i:]); err != nil {
+						stopReason = "error"
+						r.emit(AgentEvent{Type: EventError, Error: err})
+						return
+					} else if steered {
+						break
+					}
+				}
 				if r.runBatch(ctx, b, kgThreadOrNil(r.KG, &thread), turn, tr) {
 					stopReason = "aborted"
-					r.emit(AgentEvent{Type: EventAborted})
+					r.emit(abortedEvent(ctx))
 					return
 				}
 			}
@@ -863,7 +1001,7 @@ func (r *Runtime) recoverFromPreTokenError(ctx context.Context, err error, req *
 			newMsgs = prependPostCompactRestore(newMsgs, r.snapshotTouchedFiles())
 			*msgs = newMsgs
 			req.Messages = newMsgs
-			if s, e := r.LLM.ChatStream(ctx, *req); e == nil {
+			if s, e := r.observeChat(ctx, *req, llm.CallRetry, r.LLM.ChatStream); e == nil {
 				return s, true
 			}
 		} else {
@@ -874,7 +1012,7 @@ func (r *Runtime) recoverFromPreTokenError(ctx context.Context, err error, req *
 		slog.Info("llm fallback model engaged (stream error)",
 			"agent", r.AgentID, "primary", req.Model, "fallback", r.FallbackModel, "err", err.Error())
 		req.Model = r.FallbackModel
-		if s, e := r.LLM.ChatStream(ctx, *req); e == nil {
+		if s, e := r.observeChat(ctx, *req, llm.CallRetry, r.LLM.ChatStream); e == nil {
 			return s, true
 		}
 	}
@@ -890,18 +1028,25 @@ func (r *Runtime) RunSync(ctx context.Context, userMsg string, images []llm.Imag
 	}
 
 	var response strings.Builder
+	var runErr error
 	for event := range events {
 		switch event.Type {
 		case EventTextDelta:
 			response.WriteString(event.Text)
 		case EventAborted:
-			return response.String(), context.Canceled
+			if runErr == nil {
+				runErr = context.Canceled
+			}
 		case EventError:
-			return response.String(), event.Error
+			if runErr == nil {
+				runErr = event.Error
+				if runErr == nil {
+					runErr = fmt.Errorf("runtime emitted an error without details")
+				}
+			}
 		}
 	}
-
-	return response.String(), nil
+	return response.String(), runErr
 }
 
 // dispatchTool executes one tool call with strict tool_use ↔ tool_result
@@ -953,7 +1098,7 @@ func (r *Runtime) dispatchTool(
 	}
 
 	if ctx.Err() != nil {
-		return r.appendAbortedResult(tc.ID, kgThread), true
+		return r.appendAbortedResult(ctx, tc.ID, kgThread), true
 	}
 
 	result, err := callToolExecute(ctx, r.Tools, tc.Name, tc.Input)
@@ -962,11 +1107,11 @@ func (r *Runtime) dispatchTool(
 	}
 
 	if ctx.Err() != nil {
-		return r.appendAbortedResult(tc.ID, kgThread), true
+		return r.appendAbortedResult(ctx, tc.ID, kgThread), true
 	}
 
 	imgData := convertToolResultImages(result.Images)
-	r.Session.Append(session.ToolResultEntry(tc.ID, result.Output, result.Error, imgData))
+	r.Session.AppendContext(ctx, session.ToolResultWithArtifactsEntry(tc.ID, result.Output, result.Error, imgData, resultArtifacts(result)))
 	if kgThread != nil {
 		content := result.Output
 		if result.Error != "" {
@@ -1019,14 +1164,14 @@ func (r *Runtime) executeToolKickoff(ctx context.Context, tc llm.ToolCall) (resu
 		}
 	}
 	if ctx.Err() != nil {
-		return tool.ToolResult{Error: "aborted by user"}, true
+		return tool.ToolResult{Error: toolAbortReason(ctx)}, true
 	}
 	result, err := callToolExecute(ctx, r.Tools, tc.Name, tc.Input)
 	if err != nil {
 		result = tool.ToolResult{Error: err.Error()}
 	}
 	if ctx.Err() != nil {
-		return tool.ToolResult{Error: "aborted by user"}, true
+		return tool.ToolResult{Error: toolAbortReason(ctx)}, true
 	}
 	if result.Error == "" && isFileTool(tc.Name) {
 		r.recordFileTouch(extractPathFromInput(tc.Input))
@@ -1051,16 +1196,16 @@ func (r *Runtime) appendDenialResult(toolCallID, reason string, kgThread *[]Mess
 }
 
 // appendAbortedResult writes the synthetic abort entry.
-func (r *Runtime) appendAbortedResult(toolCallID string, kgThread *[]Message) tool.ToolResult {
-	r.Session.Append(session.AbortedToolResultEntry(toolCallID))
+func (r *Runtime) appendAbortedResult(ctx context.Context, toolCallID string, kgThread *[]Message) tool.ToolResult {
+	r.Session.Append(session.AbortedToolResultWithReasonEntry(toolCallID, toolAbortReason(ctx)))
 	if kgThread != nil {
 		r.kgMu.Lock()
 		*kgThread = append(*kgThread, Message{
-			Role: "user", Content: "[error] aborted by user",
+			Role: "user", Content: "[error] " + toolAbortReason(ctx),
 		})
 		r.kgMu.Unlock()
 	}
-	return tool.ToolResult{Error: "aborted by user"}
+	return tool.ToolResult{Error: toolAbortReason(ctx)}
 }
 
 // convertToolResultImages adapts tool image attachments to session ImageData.
@@ -1084,4 +1229,19 @@ func kgThreadOrNil(kg KnowledgeGraph, thread *[]Message) *[]Message {
 		return nil
 	}
 	return thread
+}
+
+// MCPServerStatus is immutable construction evidence without credentials or raw
+// transport errors. Connected servers alone contribute tools to the catalogue.
+type MCPServerStatus struct {
+	Name     string
+	Optional bool
+	State    string
+	Tools    int
+}
+
+func (r *Runtime) MCPStatus() []MCPServerStatus {
+	r.mcpMu.Lock()
+	defer r.mcpMu.Unlock()
+	return append([]MCPServerStatus(nil), r.mcpStatus...)
 }

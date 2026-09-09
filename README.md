@@ -404,3 +404,39 @@ for the changelog of each tagged version.
 ## License
 
 MIT — see [`LICENSE`](./LICENSE).
+
+## Usage accounting
+
+See [USAGE.md](USAGE.md) for request-level records, reported versus unknown usage,
+retry/compaction accounting and the cache-counter migration from v0.3.9.
+
+### Managed subprocess lifecycle and output
+
+The `process` package creates a private Unix process group for a command and
+kills that group on context cancellation. `process.Run` joins the command and
+removes descendants after normal exit too. Callers using `Start`/`Wait` directly
+must call `process.KillGroup` when their protocol closes. Bash and stdio MCP use
+this lifecycle; non-Unix platforms currently provide direct-child cleanup only.
+A child that deliberately starts a new session can escape a process group: this
+is lifecycle management, not isolation. Use a containment backend for isolation.
+
+`process.Capture` drains output while retaining a bounded prefix. Bash retains
+at most 64 KiB per stdout/stderr stream and includes explicit truncation notices,
+observed byte counts, truncation flags, cancellation/timeout flags and an exit
+code when available in result metadata. Cancellation and timeout reasons remain
+visible even if stderr has content. Output exceeding the memory prefix is spooled into private 0600 artifacts. The
+metadata and inline notice identify their paths, captured bytes, disk truncation
+and any capture error. The default store is `harness-output-<uid>` under the OS
+temporary directory; callers may provide BashTool.OutputStore to choose a
+private directory. Treat output as potentially sensitive.
+
+Each artifact is capped at 8 MiB and the store reserves at most 64 MiB across
+active and completed captures. Cooperating processes use advisory locks so
+active files cannot be evicted; completed files are evicted oldest first.
+Allocation also removes completed files older than 24 hours. Time-based cleanup
+is lazy, so files can remain until the next allocation; storage remains bounded.
+Artifacts are ephemeral and paths can expire after eviction. A full active quota
+or write failure is explicitly reported while output continues to drain.
+Artifact locking is supported on Unix; other platforms report unavailable disk
+capture and retain the bounded inline prefix. These locks do not defend against
+malicious programs running as the same user.

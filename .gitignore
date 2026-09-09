@@ -43,3 +43,6 @@ support-agent-audit.jsonl
 # Env
 .env
 .env.local
+
+# Keep native qualification setup with its runner.
+!scripts/QUALIFICATION.md

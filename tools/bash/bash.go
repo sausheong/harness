@@ -1,17 +1,20 @@
 package bash
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sausheong/harness/execution"
+	"github.com/sausheong/harness/process"
 	"github.com/sausheong/harness/tool"
 )
 
@@ -89,8 +92,10 @@ type ExecPolicy struct {
 
 // BashTool executes shell commands.
 type BashTool struct {
-	WorkDir    string
-	ExecPolicy *ExecPolicy // nil means "full" (allow everything)
+	Backend     execution.Backend // optional explicit command boundary; configured before use
+	WorkDir     string
+	OutputStore *process.ArtifactStore // nil uses the private per-user temporary store
+	ExecPolicy  *ExecPolicy            // nil means "full" (allow everything)
 }
 
 type bashInput struct {
@@ -183,8 +188,10 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tool.Too
 	// (e.g. ASCII spaces in a filename that on disk uses NBSP). Substitution
 	// only fires when the on-disk entry actually contains Unicode whitespace,
 	// so create-style commands like `mkdir /tmp/newdir` are unaffected.
-	resolvedCmd, pathSubs := resolveBashCommandPaths(in.Command)
-	in.Command = resolvedCmd
+	var pathSubs [][2]string
+	if t.Backend == nil {
+		in.Command, pathSubs = resolveBashCommandPaths(in.Command)
+	}
 
 	// Enforce exec policy
 	if t.ExecPolicy != nil {
@@ -229,38 +236,83 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tool.Too
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	if t.Backend != nil {
+		return t.executeBackend(ctx, in.Command), nil
+	}
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/c", in.Command)
+		cmd = process.Command(ctx, "cmd", "/c", in.Command)
 	} else {
-		cmd = exec.CommandContext(ctx, "bash", "-c", in.Command)
+		cmd = process.Command(ctx, "bash", "-c", in.Command)
 	}
 	if t.WorkDir != "" {
 		cmd.Dir = t.WorkDir
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	store := t.OutputStore
+	if store == nil {
+		var err error
+		store, err = process.NewArtifactStore(filepath.Join(os.TempDir(), "harness-output-"+strconv.Itoa(os.Getuid())))
+		if err != nil {
+			return tool.ToolResult{Error: "prepare output capture: " + err.Error()}, nil
+		}
+	}
+	stdout, stderr := store.Capture(64<<10), store.Capture(64<<10)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := process.Run(cmd)
+	stdout.Close()
+	stderr.Close()
 
-	output := stdout.String()
-	errOutput := stderr.String()
+	output, stdoutBytes, stdoutTruncated := stdout.Snapshot()
+	errOutput, stderrBytes, stderrTruncated := stderr.Snapshot()
+	metadata := map[string]any{
+		"stdout_bytes": stdoutBytes, "stderr_bytes": stderrBytes,
+		"stdout_artifact": stdout.Info(), "stderr_artifact": stderr.Info(),
+		"stdout_truncated": stdoutTruncated, "stderr_truncated": stderrTruncated,
+		"cancelled": ctx.Err() == context.Canceled,
+		"timed_out": ctx.Err() == context.DeadlineExceeded,
+	}
+	if cmd.ProcessState != nil {
+		metadata["exit_code"] = cmd.ProcessState.ExitCode()
+	}
+	if stdoutTruncated {
+		output += "\n[stdout truncated after 65536 bytes]"
+	}
+	if stderrTruncated {
+		errOutput += "\n[stderr truncated after 65536 bytes]"
+	}
 
 	notice := pathSubsNotice(pathSubs)
+	for _, capture := range []struct {
+		name string
+		info process.ArtifactInfo
+	}{
+		{"stdout", stdout.Info()}, {"stderr", stderr.Info()},
+	} {
+		if capture.info.Path != "" {
+			notice += fmt.Sprintf("[%s artifact: %s; %d bytes; truncated=%t]\n", capture.name, capture.info.Path, capture.info.Bytes, capture.info.Truncated)
+		}
+		if capture.info.Error != "" {
+			notice += fmt.Sprintf("[%s artifact unavailable or incomplete: %s]\n", capture.name, capture.info.Error)
+		}
+	}
 
 	if err != nil {
 		msg := err.Error()
 		if ctx.Err() == context.DeadlineExceeded {
 			msg = "command timed out"
+		} else if ctx.Err() == context.Canceled {
+			msg = "command cancelled"
 		}
 		if errOutput != "" {
-			msg = errOutput
+			msg += ": " + errOutput
 		}
 		return tool.ToolResult{
-			Output: notice + output,
-			Error:  msg,
+			Output:   notice + output,
+			Error:    msg,
+			Metadata: metadata,
 		}, nil
 	}
 
@@ -268,7 +320,7 @@ func (t *BashTool) Execute(ctx context.Context, input json.RawMessage) (tool.Too
 		output += "\nSTDERR:\n" + errOutput
 	}
 
-	return tool.ToolResult{Output: notice + output}, nil
+	return tool.ToolResult{Output: notice + output, Metadata: metadata}, nil
 }
 
 // pathSubsNotice formats a one-block notice listing any path substitutions
@@ -284,4 +336,44 @@ func pathSubsNotice(subs [][2]string) string {
 	}
 	b.WriteString("---\n")
 	return b.String()
+}
+
+// Explicit backends receive the exact approved shell source. Do not reinterpret
+// paths on the host: the backend filesystem can contain different resources.
+func (t *BashTool) executeBackend(ctx context.Context, command string) tool.ToolResult {
+	store := t.OutputStore
+	if store == nil {
+		var err error
+		store, err = process.NewArtifactStore(filepath.Join(os.TempDir(), "harness-output-"+strconv.Itoa(os.Getuid())))
+		if err != nil {
+			return tool.ToolResult{Error: "prepare output capture: " + err.Error()}
+		}
+	}
+	r, err := t.Backend.Run(ctx, execution.Request{Argv: []string{"/bin/bash", "-c", command}, OutputStore: store})
+	meta := map[string]any{"execution_boundary": t.Backend.Boundary(), "exit_code": r.ExitCode, "stdout_bytes": r.StdoutBytes, "stderr_bytes": r.StderrBytes, "stdout_artifact": r.StdoutArtifact, "stderr_artifact": r.StderrArtifact, "output_truncated": r.Truncated, "stdout_truncated": r.StdoutTruncated, "stderr_truncated": r.StderrTruncated, "cancelled": ctx.Err() == context.Canceled, "timed_out": ctx.Err() == context.DeadlineExceeded}
+	output := r.Stdout
+	if r.Stderr != "" {
+		output += "\nSTDERR:\n" + r.Stderr
+	}
+	if r.Truncated {
+		output += "\n[inline output truncated; inspect capture artifacts]"
+	}
+	for _, capture := range []struct {
+		name string
+		info process.ArtifactInfo
+	}{{"stdout", r.StdoutArtifact}, {"stderr", r.StderrArtifact}} {
+		if capture.info.Error != "" {
+			output += "\n[" + capture.name + " artifact unavailable or incomplete: " + capture.info.Error + "]"
+		}
+	}
+	result := tool.ToolResult{Output: output, Metadata: meta}
+	if err != nil {
+		result.Error = err.Error()
+	}
+	if ctx.Err() == context.Canceled {
+		result.Error = "command cancelled"
+	} else if ctx.Err() == context.DeadlineExceeded {
+		result.Error = "command timed out"
+	}
+	return result
 }

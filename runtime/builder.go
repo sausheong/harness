@@ -70,9 +70,23 @@ type RuntimeInputs struct {
 //  2. Parsing the reasoning mode (default-to-off + warn on invalid)
 //  3. Resolving the per-agent KnowledgeGraph via deps.KGFn (nil-safe)
 //
-// Returns the constructed Runtime and a nil error today, but callers MUST
-// check the error: the return is reserved for future validation.
+// Use BuildRuntimeContext when construction must be cancellable.
 func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runtime, error) {
+	return BuildRuntimeContext(context.Background(), deps, inputs, spec)
+}
+
+// BuildRuntimeContext propagates cancellation through MCP initialization and
+// discovery. On failure, all established sessions are closed before returning;
+// the caller's registry receives no partially discovered tools. The context
+// bounds construction, not the lifetime of successfully connected sessions.
+func BuildRuntimeContext(ctx context.Context, deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (_ *Runtime, buildErr error) {
+	if spec.MaxOutputTokens < 0 {
+		return nil, fmt.Errorf("max output tokens cannot be negative")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	provider, modelName := llm.ParseProviderModel(spec.Model)
 	reasoning, err := llm.ParseReasoningMode(spec.Reasoning)
 	if err != nil {
@@ -91,51 +105,73 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 	// callers always pass *tool.Registry; test paths that don't won't
 	// get load tools registered (which is fine for them).
 	var mcpClients []*mcp.Client
-	if reg, ok := inputs.Tools.(*tool.Registry); ok {
+	var mcpStatus []MCPServerStatus
+	names := make(map[string]bool)
+	for _, srv := range spec.MCPServers {
+		if srv.Name == "" || names[srv.Name] {
+			return nil, fmt.Errorf("mcp server names must be nonempty and unique")
+		}
+		if srv.ConnectTimeout < 0 {
+			return nil, fmt.Errorf("MCP connect timeout must not be negative")
+		}
+		names[srv.Name] = true
+	}
+	defer func() {
+		if buildErr != nil {
+			for _, c := range mcpClients {
+				_ = c.Close()
+			}
+		}
+	}()
+	var rt *Runtime
+	var stagedTools []tool.Tool
+	if _, ok := inputs.Tools.(*tool.Registry); ok {
 		if deps.Skills != nil {
-			skills := deps.Skills
-			reg.Register(&tool.LoadSkillTool{
+			stagedTools = append(stagedTools, &tool.LoadSkillTool{
 				Lookup: func(name string) (string, bool) {
-					return skills.Get(name)
+					if rt.Skills == nil {
+						return "", false
+					}
+					return rt.Skills.Get(name)
 				},
 			})
 		}
 		if deps.Memory != nil {
 			mem := deps.Memory
-			reg.Register(&tool.LoadMemoryTool{
+			stagedTools = append(stagedTools, &tool.LoadMemoryTool{
 				Lookup: func(id string) (string, bool) {
 					return mem.Get(id)
 				},
 			})
 		}
-		// Connect declared MCP servers and register their adapter tools.
-		// On any failure, close everything connected so far before
-		// returning — a partially-built Runtime would leak processes.
-		for _, srv := range spec.MCPServers {
-			cli, err := mcp.Connect(context.Background(), srv)
-			if err != nil {
-				for _, c := range mcpClients {
-					_ = c.Close()
-				}
-				return nil, fmt.Errorf("mcp server %q: %w", srv.Name, err)
-			}
-			for _, t := range cli.Tools() {
-				reg.Register(t)
-			}
-			mcpClients = append(mcpClients, cli)
+		var err error
+		mcpClients, mcpStatus, err = connectMCPServers(ctx, spec.MCPServers)
+		if err != nil {
+			return nil, err
 		}
+		for _, cli := range mcpClients {
+			stagedTools = append(stagedTools, cli.Tools()...)
+		}
+
 	} else if len(spec.MCPServers) > 0 {
 		return nil, fmt.Errorf("AgentSpec.MCPServers requires inputs.Tools to be *tool.Registry")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if reg, ok := inputs.Tools.(*tool.Registry); ok {
+		for _, t := range stagedTools {
+			reg.Register(t)
+		}
 	}
 
 	// Pre-compute the static portion of the system prompt so the per-turn
 	// hot loop never reads config or rebuilds the indices. The load tools
 	// are registered above so toolNames includes them in the default
 	// identity tool hints.
-	skillsIndex := ""
-	if deps.Skills != nil {
-		skillsIndex = deps.Skills.FormatIndex()
-	}
+	skillsIndex, skillSources := skillIndexSnapshot(deps.Skills)
+	promptSources := append([]ContextSource(nil), spec.SystemPromptSources...)
 	memoryIndex := ""
 	if deps.Memory != nil {
 		memoryIndex = deps.Memory.FormatIndex()
@@ -168,7 +204,7 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 
 	loop := mergeLoopConfig(deps.AgentLoop, spec.Loop)
 
-	rt := &Runtime{
+	rt = &Runtime{
 		LLM:                inputs.Provider,
 		Tools:              inputs.Tools,
 		Session:            inputs.Session,
@@ -177,6 +213,7 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 		Model:              modelName,
 		FallbackModel:      fallbackModel,
 		ContextWindow:      spec.ContextWindow,
+		MaxOutputTokens:    spec.MaxOutputTokens,
 		Provider:           provider,
 		Reasoning:          reasoning,
 		Workspace:          spec.Workspace,
@@ -190,8 +227,15 @@ func BuildRuntime(deps RuntimeDeps, inputs RuntimeInputs, spec AgentSpec) (*Runt
 		IngestSource:       inputs.IngestSource,
 		AgentLoop:          loop,
 		StaticSystemPrompt: staticPrompt,
-		CalibratorStore:    deps.CalibratorStore,
-		mcpClients:         mcpClients,
+		refreshToolPrompt: func(names []string) string {
+			currentSkills, sources := skillIndexSnapshot(rt.Skills)
+			skillSources = append([]ContextSource(nil), sources...)
+			return BuildStaticSystemPrompt(spec.Workspace, spec.SystemPrompt, spec.ID, spec.Name, names, deps.ConfigSummary, currentSkills, memoryIndex, deps.MemoryFiles)
+		},
+		contextSources:  func() []ContextSource { return append(append([]ContextSource(nil), promptSources...), skillSources...) },
+		CalibratorStore: deps.CalibratorStore,
+		mcpClients:      mcpClients,
+		mcpStatus:       mcpStatus,
 	}
 
 	// Seed the calibrator from prior (ratio, count) for this session so a
@@ -226,6 +270,15 @@ func mergeLoopConfig(base, override LoopConfig) LoopConfig {
 	}
 	if override.MaxToolResultLen > 0 {
 		out.MaxToolResultLen = override.MaxToolResultLen
+	}
+	if override.Hooks.OnRunStart != nil {
+		out.Hooks.OnRunStart = override.Hooks.OnRunStart
+	}
+	if override.Hooks.OnRunFinish != nil {
+		out.Hooks.OnRunFinish = override.Hooks.OnRunFinish
+	}
+	if override.Hooks.TransformToolContext != nil {
+		out.Hooks.TransformToolContext = override.Hooks.TransformToolContext
 	}
 	if override.Hooks.OnUserPromptSubmit != nil {
 		out.Hooks.OnUserPromptSubmit = override.Hooks.OnUserPromptSubmit

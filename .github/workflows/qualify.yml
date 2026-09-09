@@ -1,0 +1,76 @@
+name: Qualify Harness
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Record candidate identity
+        run: |
+          mkdir evidence
+          git rev-parse HEAD > evidence/commit.txt
+          git status --porcelain > evidence/status.txt
+          go version > evidence/toolchain.txt
+          go env -json GOOS GOARCH GOVERSION > evidence/platform.json
+      - name: Start Docker on hosted macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install colima docker
+          colima start --runtime docker --cpu 2 --memory 4
+          docker info
+          mkdir -p "$HOME/harness-test-tmp"
+          echo "TMPDIR=$HOME/harness-test-tmp" >> "$GITHUB_ENV"
+      - name: Prepare required Docker fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker_bin="$(command -v docker)"
+          if [ ! -x /usr/local/bin/docker ]; then
+            sudo ln -s "$docker_bin" /usr/local/bin/docker
+          fi
+          docker version > evidence/docker-version.txt
+          endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+          case "$endpoint" in
+            unix://*) socket="${endpoint#unix://}" ;;
+            *) echo 'Qualification requires a local Unix Docker socket' >&2; exit 1 ;;
+          esac
+          docker pull alpine:3.22 > evidence/alpine-pull.txt
+          docker pull debian:bookworm-slim > evidence/debian-pull.txt
+          image="$(docker image inspect --format '{{.Id}}' alpine:3.22)"
+          bash_image="$(docker image inspect --format '{{.Id}}' debian:bookworm-slim)"
+          python3 scripts/prepare_container_fixtures.py --docker /usr/local/bin/docker \
+            --socket "$socket" --image "$image" --bash-image "$bash_image" \
+            --output "$RUNNER_TEMP/harness-fixtures"
+          cp "$RUNNER_TEMP/harness-fixtures/fixtures.json" evidence/fixtures.json
+          cat "$RUNNER_TEMP/harness-fixtures/fixtures.env" >> "$GITHUB_ENV"
+      - name: Build and vet
+        run: |
+          go build ./... > evidence/build.txt 2>&1
+          go vet ./... > evidence/vet.txt 2>&1
+      - name: Uncached race and coverage suite
+        run: go test -count=1 -timeout=10m -race -json -covermode=atomic -coverprofile=evidence/coverage.out ./... > evidence/tests.jsonl 2> evidence/tests.stderr
+      - name: Reject skipped or incomplete qualification
+        run: python3 scripts/check_test_events.py evidence/tests.jsonl > evidence/test-gate.json
+      - name: Repeat lifecycle regressions
+        run: go test -count=20 -race -timeout=10m -json ./process ./tools/bash ./runtime -run 'TestCancellationStopsShellDescendant|TestNormalExitStopsShellDescendant|TestArtifactCrossProcessReservation|TestRun_StreamingAbortMidKickoffPairsAllEntries' > evidence/critical-repeat.jsonl 2> evidence/critical-repeat.stderr
+      - name: Reject skipped or incomplete lifecycle repetitions
+        run: python3 scripts/check_test_events.py evidence/critical-repeat.jsonl > evidence/repeat-gate.json
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.os }}-${{ github.sha }}
+          path: evidence/
