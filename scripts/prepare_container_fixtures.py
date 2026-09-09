@@ -3,7 +3,6 @@
 Images must already be loaded. This script never pulls images or starts a daemon.
 """
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -25,7 +24,10 @@ def prepare(docker, socket, image, bash_image, output):
         root=Path(temporary);config=root/'config';config.mkdir()
         prefix=[docker,'--config',str(config),'--host','unix://'+socket]
         def run(args):
-            return subprocess.check_output(prefix+args,stderr=subprocess.PIPE,timeout=120)
+            try:
+                return subprocess.check_output(prefix+args,stderr=subprocess.PIPE,timeout=120)
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(error.stderr.decode(errors='replace')) from error
         inspected=[]
         for identity in (image,bash_image):
             info=json.loads(run(['image','inspect',identity]))[0]
@@ -34,11 +36,12 @@ def prepare(docker, socket, image, bash_image, output):
             inspected.append(dict(id=identity,architecture=info['Architecture']))
         if inspected[0]['architecture']!=inspected[1]['architecture']:
             raise ValueError('fixture image architectures differ')
-        dockerfile=('FROM '+image+'\nVOLUME /implicit-fixture-volume\n').encode()
-        (root/'Dockerfile').write_bytes(dockerfile)
-        # Untagged derived image is identified solely by its captured ID.
-        raw=run(['build','--pull=false','--network=none','--quiet',str(root)])
-        volume=raw.decode().strip()
+        # Create without starting: no process, build engine or registry lookup.
+        container=run(['create','--network=none',image,'/bin/true']).decode().strip()
+        try:
+            volume=run(['commit','--change','VOLUME /implicit-fixture-volume',container]).decode().strip()
+        finally:
+            run(['rm','--volumes',container])
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',volume):
             raise ValueError('derived image ID missing')
         info=json.loads(run(['image','inspect',volume]))[0]
@@ -47,7 +50,7 @@ def prepare(docker, socket, image, bash_image, output):
         settings=dict(HARNESS_TEST_CONTAINER_IMAGE=image,HARNESS_TEST_BASH_IMAGE=bash_image,
                       HARNESS_TEST_VOLUME_IMAGE=volume,HARNESS_TEST_CONTAINER_SOCKET=socket)
         report=dict(status='prepared',environment=settings,images=inspected,
-                    volume_dockerfile_sha256=hashlib.sha256(dockerfile).hexdigest(),
+                    volume_creation='commit stopped container with VOLUME /implicit-fixture-volume',
                     note='Loaded images are retained; no tests or publication performed.')
         (output/'fixtures.json').write_text(json.dumps(report,indent=2)+'\n')
         (output/'fixtures.env').write_text(''.join(k+'='+v+'\n' for k,v in settings.items()))
