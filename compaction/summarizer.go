@@ -18,25 +18,21 @@ var ErrEmptySummary = errors.New("compaction: empty summary returned")
 // for compaction. The provider is expected to be the bundled Ollama in
 // production but any LLMProvider works (used for tests).
 type Summarizer struct {
-	Provider llm.LLMProvider
-	Model    string        // bare model id, e.g. "qwen2.5:3b-instruct"
-	Timeout  time.Duration // per-call deadline; 0 → 60s
+	Route llm.CallRoute // identifies the independently selected provider client
+
+	Provider        llm.LLMProvider
+	MaxOutputTokens int           // 0 defaults to 4096; otherwise 1-32768
+	Model           string        // bare model id, e.g. "qwen2.5:3b-instruct"
+	Timeout         time.Duration // per-call deadline; 0 → 60s
 }
 
 // Summarize sends entries through the configured provider and returns the
 // trimmed, formatted summary text. additionalInstructions is appended to
 // the prompt when non-empty (used by manual /compact <focus...>).
 //
-// The call wraps three fallback stages:
-//  1. Full transcript — preferred; preserves all detail.
-//  2. Small-only — drops oversized messages, keeps a note that they were
-//     elided. Triggered when stage 1 returns a context-overflow error
-//     or a stream error.
-//  3. Placeholder — a static stub indicating compaction failed; never
-//     returns an error to the caller so the agent loop can continue.
-//
-// Each stage applies FormatCompactSummary to strip the analysis scratchpad
-// and unwrap the summary block.
+// A full transcript is attempted first. Overflow/stream failures may retry
+// with oversized messages explicitly elided. If neither attempt produces a
+// summary, return the error so the manager preserves effective history.
 func (s *Summarizer) Summarize(ctx context.Context, entries []session.SessionEntry, additionalInstructions string) (string, error) {
 	return s.summarizeWithFallback(ctx, entries, additionalInstructions)
 }
@@ -49,16 +45,8 @@ func (s *Summarizer) summarizeWithFallback(ctx context.Context, entries []sessio
 	}
 	stage1Err := err
 
-	// Context cancellation/deadline propagates up — the caller asked us to
-	// stop, so don't burn an extra provider call on stage 2 or paper over
-	// the cancel with a placeholder. This preserves the Manager's ability
-	// to classify cancellation/timeout distinctly from "compaction is
-	// genuinely broken; degrade gracefully".
-	//
-	// We also propagate a per-call deadline (Summarizer.Timeout firing while
-	// the parent ctx is still alive) — otherwise a per-call timeout would
-	// flow into stage 2/3, masking timeout as a placeholder. Manager
-	// classifies the wrapped DeadlineExceeded as Skipped: "timeout".
+	// Cancellation and per-call deadlines stop retries and retain their
+	// classification for the manager.
 	if ctxErr := ctx.Err(); ctxErr != nil || errors.Is(stage1Err, context.DeadlineExceeded) {
 		return "", stage1Err
 	}
@@ -67,7 +55,7 @@ func (s *Summarizer) summarizeWithFallback(ctx context.Context, entries []sessio
 	// buildSmallOnlyTranscript actually elides something — otherwise we'd
 	// be re-sending the same transcript with the same prompt against the
 	// same provider (predictable failure, wasted call). Fall through to
-	// stage 3 in that case.
+	// the final error in that case.
 	if isOverflowError(stage1Err) || isStreamError(stage1Err) {
 		small, droppedCount := buildSmallOnlyTranscript(entries)
 		if droppedCount > 0 {
@@ -79,9 +67,10 @@ func (s *Summarizer) summarizeWithFallback(ctx context.Context, entries []sessio
 		}
 	}
 
-	// Stage 3: placeholder. Never returns an error — the agent loop must
-	// be able to continue even if compaction is wholly broken.
-	return placeholderSummary(len(entries)), nil
+	if failure := errors.Join(stage1Err, err); failure != nil {
+		return "", failure
+	}
+	return "", ErrEmptySummary
 }
 
 // callOnce performs a single summarizer invocation against a pre-built
@@ -94,6 +83,16 @@ func (s *Summarizer) summarizeWithFallback(ctx context.Context, entries []sessio
 // 5-minute TTL window hits cache_read for the prefix, dropping a few
 // seconds off TTFT.
 func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstructions string) (string, error) {
+	maxTokens := s.MaxOutputTokens
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+	if maxTokens < 1 || maxTokens > 32768 {
+		return "", errors.New("summariser output token limit must be 1-32768")
+	}
+	if s.Provider == nil {
+		return "", errors.New("summariser provider unavailable")
+	}
 	systemPrompt, userMessage := BuildPromptParts(transcript, additionalInstructions)
 	timeout := s.Timeout
 	if timeout == 0 {
@@ -103,6 +102,7 @@ func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstruc
 	defer cancel()
 
 	req := llm.ChatRequest{
+		Route:    s.Route,
 		Model:    s.Model,
 		Messages: []llm.Message{{Role: "user", Content: userMessage}},
 		// One cache-marked system part: providers that support caching
@@ -111,9 +111,9 @@ func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstruc
 		SystemPromptParts: []llm.SystemPromptPart{
 			{Text: systemPrompt, Cache: true},
 		},
-		MaxTokens: 4096,
+		MaxTokens: maxTokens,
 	}
-	stream, err := s.Provider.ChatStream(callCtx, req)
+	stream, err := llm.ObserveChat(callCtx, req, llm.CallCompaction, s.Provider.ChatStream)
 	if err != nil {
 		return "", fmt.Errorf("compaction: chat stream: %w", err)
 	}
@@ -122,10 +122,16 @@ func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstruc
 	for ev := range stream {
 		switch ev.Type {
 		case llm.EventTextDelta:
+			if len(ev.Text) > 256<<10-sb.Len() {
+				return "", errors.New("summariser response exceeds 256 KiB")
+			}
 			sb.WriteString(ev.Text)
 		case llm.EventError:
 			return "", fmt.Errorf("compaction: stream error: %w", ev.Error)
 		}
+	}
+	if err := callCtx.Err(); err != nil {
+		return "", err
 	}
 	out := strings.TrimSpace(sb.String())
 	if out == "" {
@@ -159,20 +165,6 @@ func buildSmallOnlyTranscript(entries []session.SessionEntry) (string, int) {
 		kept = append(kept, e)
 	}
 	return BuildTranscript(kept), dropped
-}
-
-// placeholderSummary is the stage-3 fallback. It must be a valid summary
-// the model can pick up from — minimally describing what was elided so
-// the next turn doesn't act as if the conversation was empty. The
-// "compaction failed and the summary could not be generated" phrase is
-// stable: Task 5's circuit breaker detects placeholders by string match
-// on this fragment to count them as failures for breaker accounting.
-func placeholderSummary(entryCount int) string {
-	return fmt.Sprintf(
-		"Summary:\nConversation history (%d entries) — compaction failed and the summary could not be generated. "+
-			"The conversation continues; refer to the recent preserved turns and ask the user for any context you need.",
-		entryCount,
-	)
 }
 
 // isOverflowError reports whether err looks like a "your prompt is too big"

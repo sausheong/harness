@@ -1,0 +1,45 @@
+name: Qualify Harness
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Record candidate identity
+        run: |
+          mkdir evidence
+          git rev-parse HEAD > evidence/commit.txt
+          git status --porcelain > evidence/status.txt
+          go version > evidence/toolchain.txt
+          go env -json GOOS GOARCH GOVERSION > evidence/platform.json
+      - name: Build and vet
+        run: |
+          go build ./... > evidence/build.txt 2>&1
+          go vet ./... > evidence/vet.txt 2>&1
+      - name: Uncached race and coverage suite
+        run: go test -count=1 -timeout=10m -race -json -covermode=atomic -coverprofile=evidence/coverage.out ./... > evidence/tests.jsonl 2> evidence/tests.stderr
+      - name: Reject skipped or incomplete qualification
+        run: python3 scripts/check_test_events.py evidence/tests.jsonl > evidence/test-gate.json
+      - name: Repeat lifecycle regressions
+        run: go test -count=20 -race -timeout=10m -json ./process ./tools/bash ./runtime -run 'TestCancellationStopsShellDescendant|TestNormalExitStopsShellDescendant|TestArtifactCrossProcessReservation|TestRun_StreamingAbortMidKickoffPairsAllEntries' > evidence/critical-repeat.jsonl 2> evidence/critical-repeat.stderr
+      - name: Reject skipped or incomplete lifecycle repetitions
+        run: python3 scripts/check_test_events.py evidence/critical-repeat.jsonl > evidence/repeat-gate.json
+      - name: Preserve raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-${{ matrix.os }}-${{ github.sha }}
+          path: evidence/

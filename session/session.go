@@ -1,11 +1,15 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/sausheong/harness/attachment"
+	"github.com/sausheong/harness/process"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,26 +18,31 @@ type EntryType string
 
 const (
 	EntryTypeMessage    EntryType = "message"
+	EntryTypeHeader     EntryType = "session_header"
 	EntryTypeToolCall   EntryType = "tool_call"
 	EntryTypeToolResult EntryType = "tool_result"
 	EntryTypeMeta       EntryType = "meta"
 	EntryTypeCompaction EntryType = "compaction"
+	EntryTypeAnnotation EntryType = "annotation" // durable metadata, never a conversation node
+	EntryTypeSelection  EntryType = "selection"  // versioned control record; never part of conversation history
 )
 
 // SessionEntry is a single node in the session DAG.
 type SessionEntry struct {
-	ID        string          `json:"id"`
-	ParentID  string          `json:"parentId,omitempty"`
-	Type      EntryType       `json:"type"`
-	Role      string          `json:"role,omitempty"` // user, assistant, system
-	Timestamp int64           `json:"timestamp"`
-	Data      json.RawMessage `json:"data"`
+	SchemaVersion int             `json:"schemaVersion,omitempty"`
+	ID            string          `json:"id"`
+	ParentID      string          `json:"parentId,omitempty"`
+	Type          EntryType       `json:"type"`
+	Role          string          `json:"role,omitempty"` // user, assistant, system
+	Timestamp     int64           `json:"timestamp"`
+	Data          json.RawMessage `json:"data"`
 }
 
-// ImageData holds a base64-encoded image for session persistence.
+// ImageData holds a legacy inline image or a durable attachment reference.
 type ImageData struct {
-	MimeType string `json:"mime_type"`
-	Data     string `json:"data"` // base64-encoded
+	MimeType  string          `json:"mime_type"`
+	Data      string          `json:"data,omitempty"` // base64-encoded legacy representation
+	Reference *attachment.Ref `json:"attachment,omitempty"`
 }
 
 // ThinkingBlockData stores a thinking block from a model response.
@@ -59,12 +68,13 @@ type ToolCallData struct {
 
 // ToolResultData holds the result of a tool call.
 type ToolResultData struct {
-	ToolCallID string      `json:"tool_call_id"`
-	Output     string      `json:"output"`
-	Error      string      `json:"error,omitempty"`
-	IsError    bool        `json:"is_error,omitempty"`
-	Aborted    bool        `json:"aborted,omitempty"` // true when the user cancelled mid-dispatch
-	Images     []ImageData `json:"images,omitempty"`
+	Artifacts  map[string]process.ArtifactInfo `json:"artifacts,omitempty"`
+	ToolCallID string                          `json:"tool_call_id"`
+	Output     string                          `json:"output"`
+	Error      string                          `json:"error,omitempty"`
+	IsError    bool                            `json:"is_error,omitempty"`
+	Aborted    bool                            `json:"aborted,omitempty"` // true when the user cancelled mid-dispatch
+	Images     []ImageData                     `json:"images,omitempty"`
 }
 
 // CompactionData holds an append-only summary of an older portion of the
@@ -84,14 +94,19 @@ type CompactionData struct {
 
 // Session holds a conversation session with DAG-structured entries.
 type Session struct {
-	ID      string
-	AgentID string
-	Key     string // channel + peer derived key
+	leaseMu            sync.Mutex
+	lease              *writerLease
+	writerClosed       bool
+	persistenceFailure atomic.Pointer[persistenceFailure]
+	ID                 string
+	AgentID            string
+	Key                string // channel + peer derived key
 
 	mu       sync.RWMutex // guards entries / entryMap / leafID
 	entries  []SessionEntry
 	entryMap map[string]*SessionEntry
-	leafID   string // current leaf for history traversal
+	header   SessionEntry // immutable after construction/load
+	leafID   string       // current leaf for history traversal
 	store    *Store
 
 	// writeMu serializes store writes and preserves their order. Acquired in
@@ -103,17 +118,45 @@ type Session struct {
 
 // NewSession creates a new empty session.
 func NewSession(agentID, key string) *Session {
-	return &Session{
-		ID:       generateID("ses"),
-		AgentID:  agentID,
-		Key:      key,
-		entryMap: make(map[string]*SessionEntry),
-	}
+	id := generateID("ses")
+	return &Session{ID: id, AgentID: agentID, Key: key, entryMap: make(map[string]*SessionEntry), header: SessionEntry{ID: id, Type: EntryTypeHeader, SchemaVersion: 1, Timestamp: time.Now().Unix()}}
 }
 
 // Append adds an entry to the session.
-func (s *Session) Append(entry SessionEntry) {
+func (s *Session) Append(entry SessionEntry) { _ = s.AppendContext(context.Background(), entry) }
+
+// AppendContext persists image blobs before publishing their referencing entry.
+// Cancellation during blob I/O is exposed as a sticky persistence failure.
+func (s *Session) AppendContext(ctx context.Context, entry SessionEntry) error {
 	s.mu.Lock()
+	fail := func(err error) error {
+		s.persistenceFailure.CompareAndSwap(nil, &persistenceFailure{err})
+		s.mu.Unlock()
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err := s.PersistenceError(); err != nil {
+		return fail(err)
+	}
+	if s.store != nil {
+		s.writeMu.Lock()
+		s.leaseMu.Lock()
+		closed := s.writerClosed
+		s.leaseMu.Unlock()
+		if closed {
+			s.writeMu.Unlock()
+			return fail(ErrSessionClosed)
+		}
+		var err error
+		entry, err = s.externalizeImages(ctx, entry)
+		s.writeMu.Unlock()
+		if err != nil {
+			return fail(err)
+		}
+	}
+
 	if entry.ID == "" {
 		entry.ID = generateID("e")
 	}
@@ -122,6 +165,24 @@ func (s *Session) Append(entry SessionEntry) {
 	}
 	if s.leafID != "" && entry.ParentID == "" {
 		entry.ParentID = s.leafID
+	}
+
+	if err := validateGraphNode(entry, func(id string) (EntryType, bool) {
+		if id == s.header.ID {
+			return EntryTypeHeader, true
+		}
+		node, ok := s.entryMap[id]
+		if !ok {
+			return "", false
+		}
+		return node.Type, true
+	}); err != nil {
+		return fail(err)
+	}
+	// Selection control records must use Branch so their durability and leaf
+	// semantics cannot be bypassed through the generic append API.
+	if entry.Type == EntryTypeSelection || entry.Type == EntryTypeHeader || entry.Type == EntryTypeAnnotation {
+		return fail(fmt.Errorf("control records require their dedicated API"))
 	}
 
 	s.entries = append(s.entries, entry)
@@ -142,12 +203,17 @@ func (s *Session) Append(entry SessionEntry) {
 	} else {
 		s.mu.Unlock()
 	}
+	return s.PersistenceError()
 }
 
 // History walks the DAG from root to current leaf and returns the path.
 func (s *Session) History() []SessionEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.historyLocked()
+}
+
+func (s *Session) historyLocked() []SessionEntry {
 	if len(s.entries) == 0 {
 		return nil
 	}
@@ -224,14 +290,30 @@ func (s *Session) LeafID() string {
 	return s.leafID
 }
 
-// Branch moves the leaf pointer to the specified entry ID, creating a branch.
-// New entries appended after this will have the branch point as their parent.
-//
-// NOTE: not lock-guarded — see Phase B spec, runs during /resume or DAG branching, never from parallel dispatch goroutines.
+// Branch durably selects an existing conversation node. Selection is an
+// append-only control record, so copying/renaming/exporting the JSONL also
+// preserves the selected branch. It is excluded from History and View.
 func (s *Session) Branch(entryID string) error {
-	if _, ok := s.entryMap[entryID]; !ok {
-		return fmt.Errorf("entry %q not found in session", entryID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	target, ok := s.entryMap[entryID]
+	if !ok || target.Type == EntryTypeSelection || target.Type == EntryTypeHeader || target.Type == EntryTypeAnnotation {
+		return fmt.Errorf("entry %q is not a conversation node", entryID)
 	}
+	if err := s.PersistenceError(); err != nil {
+		return err
+	}
+	marker := SessionEntry{ID: generateID("select"), ParentID: entryID, Type: EntryTypeSelection, Timestamp: time.Now().Unix(), Data: json.RawMessage(`{"version":1}`)}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.store != nil {
+		s.store.AppendEntry(s, marker)
+		if err := s.Flush(); err != nil {
+			return err
+		}
+	}
+	s.entries = append(s.entries, marker)
+	s.entryMap[marker.ID] = &s.entries[len(s.entries)-1]
 	s.leafID = entryID
 	return nil
 }
@@ -248,19 +330,18 @@ func (s *Session) EstimateTokens() int {
 	return totalChars / 4
 }
 
-// Compact replaces older history entries with a summary entry.
-// It keeps the most recent keepEntries entries and replaces everything
-// before them with a single summary meta entry.
-// The summary text should be generated by the caller (typically by asking
-// the LLM to summarize).
-//
-// NOTE: not lock-guarded — runs between turns only. Calls History() and
-// Entries() (via store.Rewrite) internally; do NOT wrap in s.mu.Lock()
-// without also restructuring those calls, or you will deadlock on the
-// non-recursive sync.RWMutex.
+// Compact creates a new summarised branch while retaining all original
+// records and branches. Kept messages receive new IDs and parents; the original
+// nodes are immutable and remain available for branching and export. The
+// replacement is atomic on disk and keeps appends ordered behind the snapshot.
 func (s *Session) Compact(summary string, keepEntries int) {
-	history := s.History()
+	if keepEntries < 0 {
+		keepEntries = 0
+	}
+	s.mu.Lock()
+	history := s.historyLocked()
 	if len(history) <= keepEntries {
+		s.mu.Unlock()
 		return // nothing to compact
 	}
 
@@ -278,31 +359,29 @@ func (s *Session) Compact(summary string, keepEntries int) {
 		Data:      summaryData,
 	}
 
-	// Rebuild the session with summary + recent entries
-	s.entries = nil
-	s.entryMap = make(map[string]*SessionEntry)
-	s.leafID = ""
-
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	// Add summary entry
 	s.entries = append(s.entries, summaryEntry)
-	s.entryMap[summaryEntry.ID] = &s.entries[0]
+	s.entryMap[summaryEntry.ID] = &s.entries[len(s.entries)-1]
 	s.leafID = summaryEntry.ID
 
-	// Add recent entries, re-parenting the first one to the summary
-	for i, entry := range recentEntries {
-		if i == 0 {
-			entry.ParentID = summaryEntry.ID
-		} else {
-			entry.ParentID = recentEntries[i-1].ID
-		}
+	// Clone recent entries onto the new summary branch. Never rewrite the
+	// identities or parent links of records in the original graph.
+	for _, entry := range recentEntries {
+		entry.ID = generateID("e")
+		entry.ParentID = s.leafID
 		s.entries = append(s.entries, entry)
 		s.entryMap[entry.ID] = &s.entries[len(s.entries)-1]
 		s.leafID = entry.ID
 	}
 
-	// Rewrite the session file if store is set
-	if s.store != nil {
-		s.store.Rewrite(s)
+	entries := append([]SessionEntry(nil), s.entries...)
+	store := s.store
+	s.mu.Unlock()
+	// Keep appends ordered behind the snapshot until its replacement commits.
+	if store != nil {
+		store.rewriteEntries(s, entries)
 	}
 }
 
@@ -390,7 +469,13 @@ func ToolCallEntry(toolCallID, toolName string, input json.RawMessage) SessionEn
 
 // ToolResultEntry creates a tool result entry.
 func ToolResultEntry(toolCallID, output, errMsg string, images []ImageData) SessionEntry {
+	return ToolResultWithArtifactsEntry(toolCallID, output, errMsg, images, nil)
+}
+
+// ToolResultWithArtifactsEntry records immutable captured-output references.
+func ToolResultWithArtifactsEntry(toolCallID, output, errMsg string, images []ImageData, artifacts map[string]process.ArtifactInfo) SessionEntry {
 	data, _ := json.Marshal(ToolResultData{
+		Artifacts:  artifacts,
 		ToolCallID: toolCallID,
 		Output:     output,
 		Error:      errMsg,
@@ -407,9 +492,14 @@ func ToolResultEntry(toolCallID, output, errMsg string, images []ImageData) Sess
 // was cancelled before completion. Pairs with a previously-appended ToolCallEntry
 // to satisfy the API invariant that every tool_use has a matching tool_result.
 func AbortedToolResultEntry(toolCallID string) SessionEntry {
+	return AbortedToolResultWithReasonEntry(toolCallID, "aborted by user")
+}
+
+// AbortedToolResultWithReasonEntry retains the cause of an interrupted tool.
+func AbortedToolResultWithReasonEntry(toolCallID, reason string) SessionEntry {
 	data, _ := json.Marshal(ToolResultData{
 		ToolCallID: toolCallID,
-		Error:      "aborted by user",
+		Error:      reason,
 		IsError:    true,
 		Aborted:    true,
 	})

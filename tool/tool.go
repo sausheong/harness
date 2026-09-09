@@ -285,30 +285,14 @@ func ValidatePathInWorkDir(path, workDir string) error {
 		return fmt.Errorf("invalid path: %w", err)
 	}
 
-	// Resolve symlinks to prevent symlink-based traversal
-	realWork, err := filepath.EvalSymlinks(absWork)
+	realWork, err := resolveCreationPath(absWork)
 	if err != nil {
-		realWork = absWork // workspace might not exist yet
+		return fmt.Errorf("resolve workspace: %w", err)
 	}
-
-	// Resolve an existing target itself so a final-component symlink cannot
-	// escape the workspace. For a path that does not exist yet, resolve its
-	// parent directory instead so callers can safely create a new file.
-	realPath, targetErr := filepath.EvalSymlinks(absPath)
-	if targetErr == nil {
-		if !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) && realPath != realWork {
-			return fmt.Errorf("path %q is outside workspace %q", path, workDir)
-		}
-		return nil
-	}
-
-	parentDir := filepath.Dir(absPath)
-	realParent, err := filepath.EvalSymlinks(parentDir)
+	realPath, err := resolveCreationPath(absPath)
 	if err != nil {
-		// Parent doesn't exist — use the unresolved absolute path
-		realParent = parentDir
+		return fmt.Errorf("resolve target: %w", err)
 	}
-	realPath = filepath.Join(realParent, filepath.Base(absPath))
 
 	if !strings.HasPrefix(realPath, realWork+string(filepath.Separator)) && realPath != realWork {
 		return fmt.Errorf("path %q is outside workspace %q", path, workDir)
@@ -317,9 +301,60 @@ func ValidatePathInWorkDir(path, workDir string) error {
 	return nil
 }
 
+// resolveCreationPath resolves every existing ancestor before appending missing
+// components. A dangling symlink is not a missing ordinary path: refuse it.
+func resolveCreationPath(path string) (string, error) {
+	candidate := path
+	var suffix []string
+	for {
+		_, err := os.Lstat(candidate)
+		if err == nil {
+			resolved, e := filepath.EvalSymlinks(candidate)
+			if e != nil {
+				return "", e
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return "", err
+		}
+		suffix = append(suffix, filepath.Base(candidate))
+		candidate = parent
+	}
+}
+
 // RegisterCron registers the cron tool with the given scheduler. agentID is
 // baked into the tool so jobs the agent schedules later run as the same
 // agent that scheduled them.
 func RegisterCron(reg *Registry, agentID string, scheduler JobScheduler) {
 	reg.Register(&CronTool{AgentID: agentID, Scheduler: scheduler})
+}
+
+// RegisterUnique atomically installs a batch only if every name is new and
+// unique within the batch. This supports complete dynamic tool catalogues.
+func (r *Registry) RegisterUnique(batch []Tool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	names := make(map[string]bool, len(batch))
+	for _, t := range batch {
+		if t == nil {
+			return fmt.Errorf("nil tool in batch")
+		}
+		name := t.Name()
+		if name == "" || names[name] || r.tools[name] != nil {
+			return fmt.Errorf("tool name collision: %q", name)
+		}
+		names[name] = true
+	}
+	for _, t := range batch {
+		r.tools[t.Name()] = t
+	}
+	return nil
 }

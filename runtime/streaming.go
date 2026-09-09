@@ -1,6 +1,10 @@
 package runtime
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/sausheong/harness/session"
 	"os"
 
 	"github.com/sausheong/harness/llm"
@@ -50,4 +54,28 @@ func drainKickoffs(kickoffs map[string]chan kickoffResult) {
 	for _, ch := range kickoffs {
 		<-ch
 	}
+}
+
+// persistKickoff reconciles one joined tool without rewriting a completed
+// result as cancelled. Persistence must outlive run cancellation so completed
+// output and image references are not lost when the provider fails.
+func (r *Runtime) persistKickoff(ctx context.Context, kp kickoffResult, thread *[]Message) error {
+	persistCtx := context.WithoutCancel(ctx)
+	callErr := r.Session.AppendContext(persistCtx, session.ToolCallEntry(kp.tc.ID, kp.tc.Name, kp.tc.Input))
+	entry := session.ToolResultWithArtifactsEntry(kp.tc.ID, kp.result.Output, kp.result.Error, convertToolResultImages(kp.result.Images), resultArtifacts(kp.result))
+	content := kp.result.Output
+	if kp.result.Error != "" {
+		content = "[error] " + kp.result.Error
+	}
+	if kp.aborted {
+		entry = session.AbortedToolResultWithReasonEntry(kp.tc.ID, toolAbortReason(ctx))
+		content = "[error] " + toolAbortReason(ctx)
+	}
+	resultErr := r.Session.AppendContext(persistCtx, entry)
+	if thread != nil {
+		r.kgMu.Lock()
+		*thread = append(*thread, Message{Role: "assistant", Content: fmt.Sprintf("[tool: %s]\n%s", kp.tc.Name, string(kp.tc.Input))}, Message{Role: "user", Content: content})
+		r.kgMu.Unlock()
+	}
+	return errors.Join(callErr, resultErr)
 }

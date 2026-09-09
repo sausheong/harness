@@ -3,15 +3,17 @@ package file
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/sausheong/harness/tool"
 	"os"
 	"path/filepath"
-	"github.com/sausheong/harness/tool"
 )
 
 // WriteFileTool creates or overwrites a file.
 type WriteFileTool struct {
-	WorkDir string // if set, restricts writes to this directory
+	ExactPath bool   // preserve admitted path spelling; no home or Unicode recovery
+	WorkDir   string // if set, restricts writes to this directory
 }
 
 type writeFileInput struct {
@@ -55,7 +57,9 @@ func (t *WriteFileTool) Execute(_ context.Context, input json.RawMessage) (tool.
 		return tool.ToolResult{Error: "path is required"}, nil
 	}
 
-	in.Path = tool.ExpandHome(in.Path)
+	if !t.ExactPath {
+		in.Path = tool.ExpandHome(in.Path)
+	}
 	if t.WorkDir != "" && !filepath.IsAbs(in.Path) {
 		in.Path = filepath.Join(t.WorkDir, in.Path)
 	}
@@ -72,7 +76,19 @@ func (t *WriteFileTool) Execute(_ context.Context, input json.RawMessage) (tool.
 		return tool.ToolResult{Error: fmt.Sprintf("failed to create directory: %v", err)}, nil
 	}
 
-	if err := tool.WriteFileAtomic(in.Path, []byte(in.Content), 0o600); err != nil {
+	// Retain existing ordinary permission bits, including executable scripts.
+	// New files remain private. Inspection failures must not silently replace
+	// a file with restrictive defaults and lose its original mode.
+	mode := os.FileMode(0600)
+	if info, err := os.Stat(in.Path); err == nil {
+		if !info.Mode().IsRegular() {
+			return tool.ToolResult{Error: "destination is not a regular file"}, nil
+		}
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return tool.ToolResult{Error: fmt.Sprintf("inspect destination: %v", err)}, nil
+	}
+	if err := tool.WriteFileAtomic(in.Path, []byte(in.Content), mode); err != nil {
 		return tool.ToolResult{Error: fmt.Sprintf("failed to write file: %v", err)}, nil
 	}
 

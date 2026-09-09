@@ -13,7 +13,8 @@ import (
 
 // EditFileTool performs a string-replace edit on a file.
 type EditFileTool struct {
-	WorkDir string // if set, restricts edits to this directory
+	ExactPath bool   // preserve admitted path spelling; no home or Unicode recovery
+	WorkDir   string // if set, restricts edits to this directory
 }
 
 type editFileInput struct {
@@ -62,11 +63,15 @@ func (t *EditFileTool) Execute(ctx context.Context, input json.RawMessage) (tool
 		return tool.ToolResult{Error: "path is required"}, nil
 	}
 
-	in.Path = tool.ExpandHome(in.Path)
+	if !t.ExactPath {
+		in.Path = tool.ExpandHome(in.Path)
+	}
 	if t.WorkDir != "" && !filepath.IsAbs(in.Path) {
 		in.Path = filepath.Join(t.WorkDir, in.Path)
 	}
-	in.Path = tool.ResolveExistingPath(in.Path)
+	if !t.ExactPath {
+		in.Path = tool.ResolveExistingPath(in.Path)
+	}
 
 	if t.WorkDir != "" {
 		if err := tool.ValidatePathInWorkDir(in.Path, t.WorkDir); err != nil {

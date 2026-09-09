@@ -37,12 +37,15 @@ type AgentSpec struct {
 	// SystemPrompt overrides the built-in default identity. Empty ⇒
 	// BuildStaticSystemPrompt composes a default identity string from
 	// the registered tool names.
-	SystemPrompt string
+	SystemPrompt        string
+	SystemPromptSources []ContextSource
 	// MaxTurns caps the tool-use loop (default 25 when 0).
 	MaxTurns int
 	// ContextWindow overrides the auto-detected window from
 	// tokens.ContextWindow. 0 ⇒ auto-detect.
 	ContextWindow int
+	// MaxOutputTokens bounds each generation request. Zero retains the 8192 default.
+	MaxOutputTokens int
 	// Reasoning maps to each provider's native reasoning knob. Use
 	// llm.ReasoningOff (zero value), Low, Medium, or High.
 	Reasoning string
@@ -101,6 +104,21 @@ type HookDecision struct {
 // that hook is skipped. Hooks run synchronously on the runtime
 // goroutine; expensive work should be deferred by the implementation.
 type LifecycleHooks struct {
+	// OnRunStart is an admission callback for each accepted Run or RunTurn call,
+	// after budget setup and before appending user input or contacting a provider.
+	// Failure aborts the call. RunTurn emits one lifecycle pair per invocation.
+	OnRunStart func(context.Context) error
+	// OnRunFinish observes the established outcome and cannot change it. The
+	// runtime supplies a cancellation-independent cleanup context capped at 2s.
+	OnRunFinish func(context.Context, string)
+
+	// TransformToolContext runs before each actual provider request, including
+	// retries, on tool text only. Preserve entry indices and count. Returned text
+	// is bounded to 256 KiB per entry and affects only the request copy, never
+	// persisted tool results. Errors abort before provider admission. Configure
+	// hooks before execution; implementations must respect context cancellation.
+	TransformToolContext func(context.Context, []ToolContextText) ([]ToolContextText, error)
+
 	// OnUserPromptSubmit fires once at the top of Run, BEFORE the
 	// user message is appended to the session. The hook may rewrite
 	// the prompt and/or images; the rewritten values are what the
@@ -133,7 +151,7 @@ type LifecycleHooks struct {
 // static system prompt and resolve a skill body on demand via the
 // load_skill tool. Optional — pass nil on Deps.Skills to disable.
 //
-// FormatIndex is called once at BuildRuntime time; the returned string
+// FormatIndex is called at BuildRuntime time and safe request boundaries; the returned string
 // is concatenated into the cacheable static system prompt. Get is wired
 // through tool.LoadSkillTool's Lookup closure; load_skill.Execute
 // calls it at agent-loop time.

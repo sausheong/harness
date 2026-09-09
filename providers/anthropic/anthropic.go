@@ -354,7 +354,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req llm.ChatRequest)
 					events <- llm.ChatEvent{
 						Type: llm.EventDone,
 						Usage: &llm.Usage{
-							InputTokens:              int(inputTokens),
+							InputTokens:              int(inputTokens + cacheCreationTokens + cacheReadTokens),
 							OutputTokens:             int(event.Usage.OutputTokens),
 							CacheCreationInputTokens: int(cacheCreationTokens),
 							CacheReadInputTokens:     int(cacheReadTokens),
@@ -457,7 +457,7 @@ func (p *AnthropicProvider) ChatNonStreaming(ctx context.Context, req llm.ChatRe
 		events <- llm.ChatEvent{
 			Type: llm.EventDone,
 			Usage: &llm.Usage{
-				InputTokens:              int(msg.Usage.InputTokens),
+				InputTokens:              int(msg.Usage.InputTokens + msg.Usage.CacheCreationInputTokens + msg.Usage.CacheReadInputTokens),
 				OutputTokens:             int(msg.Usage.OutputTokens),
 				CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
 				CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),

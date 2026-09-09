@@ -163,3 +163,24 @@ func TestRunTurn_PreCancelledContext(t *testing.T) {
 	require.Error(t, res.Err)
 	require.EqualValues(t, 0, llmProvider.calls.Load(), "LLM must not be called when context is pre-cancelled")
 }
+
+func TestRunTurnExcludesConcurrentRuntimeOperations(t *testing.T) {
+	rt := &Runtime{LLM: &scriptedStreamLLM{events: []scriptedStreamEvent{{typ: llm.EventTextDelta, text: "hello"}, {typ: llm.EventDone}}}, Tools: newEchoRegistry(), Session: session.NewSession("a", "k"), AgentID: "a", Model: "test"}
+	rt.runMu.Lock()
+	_, err := rt.RunTurn(context.Background(), "rejected", nil, nil)
+	rt.runMu.Unlock()
+	require.Error(t, err)
+	require.Empty(t, rt.Session.Entries())
+	observed := false
+	_, err = rt.RunTurn(context.Background(), "accepted", nil, func(AgentEvent) {
+		observed = true
+		if rt.runMu.TryLock() {
+			rt.runMu.Unlock()
+			t.Error("runtime lock released during RunTurn")
+		}
+	})
+	require.NoError(t, err)
+	require.True(t, observed)
+	require.True(t, rt.runMu.TryLock(), "runtime lock not released after RunTurn")
+	rt.runMu.Unlock()
+}

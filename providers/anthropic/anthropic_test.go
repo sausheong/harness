@@ -424,7 +424,7 @@ data: {"type":"message_stop"}
 	require.Equal(t, 42, done.Usage.CacheCreationInputTokens)
 	require.Equal(t, 17, done.Usage.CacheReadInputTokens)
 	require.Equal(t, 5, done.Usage.OutputTokens)
-	require.Equal(t, 10, done.Usage.InputTokens)
+	require.Equal(t, 69, done.Usage.InputTokens) // 10 uncached + 42 cache creation + 17 cache read
 }
 
 // TestBuildMessageParamsIsPure protects the cache-prefix invariant

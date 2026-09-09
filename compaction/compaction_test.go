@@ -93,12 +93,7 @@ func TestManagerRefusesShortSession(t *testing.T) {
 	assert.Equal(t, "too_short", res.Skipped)
 }
 
-func TestManagerSummarizerErrorFallsBackToPlaceholder(t *testing.T) {
-	// With the three-stage fallback chain, an empty model response no
-	// longer surfaces ErrEmptySummary to the Manager — stage 3 emits a
-	// placeholder summary so compaction "succeeds" with a stub. The
-	// circuit breaker (Task 5) detects the stub by string match for
-	// breaker accounting.
+func TestManagerSummarizerErrorSkipsWithoutSummary(t *testing.T) {
 	mgr := &Manager{
 		Summarizer: &Summarizer{
 			Provider: &fakeProvider{text: ""},
@@ -110,9 +105,9 @@ func TestManagerSummarizerErrorFallsBackToPlaceholder(t *testing.T) {
 	sess := longSession()
 	res, err := mgr.MaybeCompact(context.Background(), sess, ReasonManual, "")
 	require.NoError(t, err)
-	assert.True(t, res.Compacted, "stage-3 placeholder counts as a successful compaction")
-	assert.Contains(t, res.Summary, "compaction failed",
-		"summary must contain the placeholder marker so Task 5's breaker can detect it")
+	assert.False(t, res.Compacted)
+	assert.Empty(t, res.Summary)
+	assert.NotEmpty(t, res.Skipped)
 }
 
 func TestManagerSerializesPerSession(t *testing.T) {
@@ -342,24 +337,11 @@ func TestCircuitBreakerTripsAfterMaxFailures(t *testing.T) {
 	}
 	sess := longSession()
 
-	// First N-1 attempts run the summarizer; the alwaysFailingProvider
-	// makes every call drop to stage 3 (placeholder). The breaker treats
-	// hitting stage 3 as failure for circuit-breaker accounting.
-	//
-	// After each placeholder compaction, View() walks back to the new
-	// compaction entry and Split sees only the preserved K turns — too
-	// short to compact again. To keep the loop reaching the summarizer
-	// (so the failure counter can increment) we add a new user/assistant
-	// pair between iterations, simulating real conversation continuing
-	// through repeated compaction failures.
-	//
-	// First MaxConsecutiveFailures calls: Compacted=true (placeholder)
-	// — each increments the failure counter. The next call sees
-	// counter >= MaxConsecutiveFailures and is blocked by the breaker.
+	// Failed attempts leave history available and increment the breaker.
 	for i := range MaxConsecutiveFailures {
 		res, err := mgr.MaybeCompact(context.Background(), sess, ReasonPreventive, "")
 		require.NoError(t, err, "iteration %d", i)
-		assert.True(t, res.Compacted, "iteration %d should still attempt", i)
+		assert.False(t, res.Compacted, "iteration %d must preserve history", i)
 		// Add new turns so the next iteration has something to compact.
 		sess.Append(session.UserMessageEntry("follow-up"))
 		sess.Append(session.AssistantMessageEntry("more reply"))
@@ -428,4 +410,82 @@ func longSessionWith(agentID, key string) *session.Session {
 		sess.Append(session.AssistantMessageEntry("assistant reply"))
 	}
 	return sess
+}
+
+func TestCommittedObserverSeesCommittedHistoryAndCannotChangeResult(t *testing.T) {
+	for _, mode := range []string{"success", "panic", "skip", "failure"} {
+		t.Run(mode, func(t *testing.T) {
+			sess := longSession()
+			defer sess.Close()
+			mgr := &Manager{Summarizer: &Summarizer{Provider: &fakeProvider{text: "summary"}, Model: "m", Timeout: time.Second}, PreserveTurns: 4}
+			if mode == "skip" {
+				mgr.Summarizer = nil
+			}
+			if mode == "failure" {
+				mgr.Summarizer.Provider = &fakeProvider{err: errors.New("unavailable")}
+			}
+			calls := 0
+			mgr.OnCommitted = func(ctx context.Context, event CommitNotification) {
+				calls++
+				if event.SessionID != sess.ID || event.TurnsCompacted == 0 || sess.View()[0].Type != session.EntryTypeCompaction {
+					t.Fatal(event, sess.View())
+				}
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 2*time.Second {
+					t.Fatal("observer not bounded")
+				}
+				lock := mgr.lockFor(stableKey(sess))
+				if !lock.TryLock() {
+					t.Fatal("observer called under compaction lock")
+				}
+				lock.Unlock()
+				if mode == "panic" {
+					panic("observer failure")
+				}
+			}
+			result, err := mgr.MaybeCompact(context.Background(), sess, ReasonManual, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := mode == "success" || mode == "panic"
+			if result.Compacted != expected || (calls == 1) != expected {
+				t.Fatal(result, calls)
+			}
+		})
+	}
+}
+
+func TestBackgroundCompactionJoinsCommittedObserver(t *testing.T) {
+	sess := longSession()
+	defer sess.Close()
+	entered, release := make(chan struct{}), make(chan struct{})
+	manager := &Manager{Summarizer: &Summarizer{Provider: &fakeProvider{text: "summary"}, Model: "m", Timeout: time.Second}, PreserveTurns: 4}
+	manager.OnCommitted = func(ctx context.Context, event CommitNotification) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := manager.MaybeCompactAsyncContext(ctx, sess, ReasonPreventive)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("observer never entered")
+	}
+	select {
+	case <-done:
+		t.Fatal("background finished before observer joined")
+	default:
+	}
+	if !manager.HasInFlight(sess) {
+		t.Fatal("active observer not tracked")
+	}
+	close(release)
+	result, joined, err := manager.JoinInFlight(ctx, sess)
+	if err != nil || !joined || !result.Compacted || manager.HasInFlight(sess) {
+		t.Fatal(result, joined, err)
+	}
 }
