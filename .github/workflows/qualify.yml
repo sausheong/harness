@@ -25,6 +25,29 @@ jobs:
           git status --porcelain > evidence/status.txt
           go version > evidence/toolchain.txt
           go env -json GOOS GOARCH GOVERSION > evidence/platform.json
+      - name: Prepare required Docker fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker_bin="$(command -v docker)"
+          if [ ! -x /usr/local/bin/docker ]; then
+            sudo ln -s "$docker_bin" /usr/local/bin/docker
+          fi
+          docker version > evidence/docker-version.txt
+          endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+          case "$endpoint" in
+            unix://*) socket="${endpoint#unix://}" ;;
+            *) echo 'Qualification requires a local Unix Docker socket' >&2; exit 1 ;;
+          esac
+          docker pull alpine:3.22 > evidence/alpine-pull.txt
+          docker pull debian:bookworm-slim > evidence/debian-pull.txt
+          image="$(docker image inspect --format '{{.Id}}' alpine:3.22)"
+          bash_image="$(docker image inspect --format '{{.Id}}' debian:bookworm-slim)"
+          python3 scripts/prepare_container_fixtures.py --docker /usr/local/bin/docker \
+            --socket "$socket" --image "$image" --bash-image "$bash_image" \
+            --output "$RUNNER_TEMP/harness-fixtures"
+          cp "$RUNNER_TEMP/harness-fixtures/fixtures.json" evidence/fixtures.json
+          cat "$RUNNER_TEMP/harness-fixtures/fixtures.env" >> "$GITHUB_ENV"
       - name: Build and vet
         run: |
           go build ./... > evidence/build.txt 2>&1
