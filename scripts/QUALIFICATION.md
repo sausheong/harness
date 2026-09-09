@@ -7,7 +7,9 @@ are never accepted. Linux uses the installed Docker service. Hosted macOS uses
 macos-15-intel with Colima, following Colima's own integration runner choice:
 https://github.com/abiosoft/colima/blob/main/.github/workflows/macos-integration.yml
 The workflow starts an ephemeral daemon on that hosted runner; it does not
-register or expose a developer's machine as a self-hosted runner.
+register or expose a developer's machine as a self-hosted runner. macOS test
+temporary directories live under the runner home, which Colima shares with its
+VM; the system /private/var/folders temporary path is not shared by default.
 
 The workflow pulls the named fixture base versions, resolves platform-specific
 immutable image IDs and records them in evidence/fixtures.json before tests.

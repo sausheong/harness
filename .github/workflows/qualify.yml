@@ -31,6 +31,8 @@ jobs:
           brew install colima docker
           colima start --runtime docker --cpu 2 --memory 4
           docker info
+          mkdir -p "$HOME/harness-test-tmp"
+          echo "TMPDIR=$HOME/harness-test-tmp" >> "$GITHUB_ENV"
       - name: Prepare required Docker fixtures
         shell: bash
         run: |
