@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.3.9.** Latest tagged release. The `runtime` API
+> **Status: v0.4.0.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -25,6 +25,33 @@ It is **not** a CLI, a UI, a hosted runtime, or a framework with
 opinions about how your agents should be deployed. There is no
 `harness` binary. You import packages, compose a `Runtime`, and call
 `rt.Run(ctx, msg, nil)`.
+
+## What's in v0.4.0
+
+v0.4.0 adds the operational controls needed by a production coding
+agent while keeping Harness a composable Go library:
+
+- **Explicit execution boundaries.** `execution.Host` labels commands
+  as unrestricted host execution. `execution.Container` uses an
+  immutable image ID, explicit mounts and environment, resource limits,
+  and fail-closed startup with no host fallback.
+- **Request, token, cost, run, and time budgets.** Provider calls can be
+  admitted before dispatch and settled against reported usage. Unknown
+  usage remains unknown rather than being counted as zero.
+- **Request-level usage accounting.** The ledger records main,
+  compaction, and other provider calls without double-counting cache
+  token subsets. See [`USAGE.md`](./USAGE.md).
+- **Durable session evolution.** Versioned JSONL records, writer leases,
+  attachments, branches, annotations, crash recovery, and explicit,
+  backed-up migration from legacy sessions. See
+  [`SESSION_FORMAT.md`](./SESSION_FORMAT.md).
+- **Steering and inspectable context.** Hosts can queue corrections at
+  joined tool boundaries, pin context, inspect composed state, and
+  retain stable tool-call identity. See
+  [`runtime/STEERING.md`](./runtime/STEERING.md).
+- **Bounded process output and joined cleanup.** Commands and stdio MCP
+  servers use managed process groups on Unix, bounded inline output,
+  and optional private spill artifacts.
 
 ## What Harness is for
 
@@ -107,7 +134,11 @@ in only what you need (e.g. `tools/file` without `tools/browser`).
 
 ```
 github.com/sausheong/harness/
+├── attachment/         # Bounded private attachment storage
+├── budget/             # Token, cost, run and deadline budgets
+├── execution/          # Explicit host/container execution backends
 ├── llm/                # LLMProvider interface, Message/ToolDef/ChatRequest types
+├── process/            # Managed subprocesses and bounded output capture
 ├── session/            # Append-only session DAG (Session, SessionEntry, Store)
 ├── tokens/             # char/4 estimator + Calibrator + CalibratorStore
 ├── compaction/         # Three-stage summarize-and-splice manager
@@ -192,7 +223,7 @@ how to plug in hooks, MCP servers, skills, permissions, and more.
 
 ## Examples
 
-Four end-to-end agents ship in [`examples/`](./examples). Each is a
+Five end-to-end agents ship in [`examples/`](./examples). Each is a
 self-contained `main.go` you can `go run`:
 
 | Example | What it shows | API surface |
@@ -241,13 +272,14 @@ none of it.
 
 ## Components
 
-A general agent harness has ~16 conceptual components: the loop, the
-model invocation layer, the tool registry, permission gating,
+A general agent harness spans the loop, the model invocation layer,
+the tool registry, permission gating,
 context/compaction, the system prompt, sub-agents, hooks, MCP, skills,
 session persistence, writable memory, writable skills, a
-self-improvement reviewer, UI, and entrypoints. harness implements the
-in-process, library-shaped subset of those. The rest is left to the
-caller — you own the binary, you own the UI, you own the channel.
+self-improvement reviewer, budgets, execution boundaries, attachments,
+UI, and entrypoints. Harness implements the in-process, library-shaped
+subset of those. The rest is left to the caller — you own the binary,
+you own the UI, you own the channel.
 
 | # | Component | Where it lives in harness |
 |---|---|---|
@@ -265,11 +297,14 @@ caller — you own the binary, you own the UI, you own the channel.
 | 12 | **Writable memory** | `tool/memory` package: `MemoryStore` interface, `MemoryTool` (action-discriminated), JSONL on-disk default. Wraps any backend; `*jsonl.Store` doubles as a `runtime.MemoryProvider`. |
 | 13 | **Writable skills** | `tool/skills` package: `SkillStore` interface, `SkillTool` (six actions: create/patch/replace/remove/list/get), directory-on-disk default. Patch supports surgical string-match with three error categories. |
 | 14 | **Self-improvement reviewer** | `runtime.Review` — one-shot reviewer Runtime against a finished session. Designed to be called from `LifecycleHooks.OnStop` in a goroutine. Snapshots parent's session; shares Memory/Skills writes; recursion guard via `AgentID = "__review__"`. |
+| 15 | **Budgets and usage** | `budget` + `llm.WithCallAdmission` / `WithUsageObserver` — pre-dispatch admission, request settlement, durable run/token/cost limits, deadlines, and reported-only accounting |
+| 16 | **Execution boundary** | `execution.Backend` — explicitly labelled host execution or a fail-closed Docker container with an immutable image, allowlisted environment, mounts, limits, and joined cleanup |
+| 17 | **Attachments and artifacts** | `attachment.Store`, session attachment records, and bounded process output artifacts with integrity checks and private storage |
 
-Deliberately not in scope (numbers from the same conceptual list):
+Deliberately not in scope:
 
-- **15 — UI**: harness emits events; the caller renders.
-- **16 — Entrypoints**: harness is a library. There is no `harness`
+- **UI**: harness emits events; the caller renders.
+- **Entrypoints**: harness is a library. There is no `harness`
   binary. The example agents in `examples/` show how a binary is
   assembled.
 
@@ -315,6 +350,14 @@ Deliberately not in scope (numbers from the same conceptual list):
   `clientcredentials.Config.Client(ctx)`) as `HTTPClient` —
   auto-refresh comes for free. Call `Runtime.Close()` to release
   sessions.
+- **Execution mode is an explicit trust decision.** `execution.Host`
+  has access to the caller's host authority and says so through
+  `Boundary()`. `execution.Container` requires a real Docker socket,
+  immutable `sha256:` image, explicit workspace and resources, and
+  never falls back to host execution. Network and workspace writes are
+  disabled unless enabled. MCP servers, hooks, and other in-process host
+  integrations remain outside that container boundary unless the caller
+  separately isolates them.
 - **Six providers, one interface.** Anthropic, OpenAI, Gemini, LiteLLM,
   OpenRouter, and local (Ollama, LM Studio, etc.) ship built-in — LiteLLM,
   OpenRouter, and local cost none of that ~300 LOC each, since all three
@@ -351,9 +394,10 @@ these, you'll need to bring them yourself or layer them on top:
 - **A skill / plugin marketplace.** Skills are `//go:embed` markdown
   in your binary, or whatever your `SkillProvider` resolves at
   runtime. There is no central registry.
-- **Auth / billing / multi-tenant infrastructure.** Per-agent
-  policy lives in `PermissionChecker`; everything else is your
-  problem.
+- **Authentication and multi-tenant infrastructure.** Per-agent policy
+  lives in `PermissionChecker`. Harness supplies accounting and budget
+  primitives, but the caller owns identity, tenancy, provider billing
+  reconciliation, and the durable policy service.
 - **Shell-command hooks.** Hooks are typed Go callbacks on
   `LifecycleHooks`, not subprocess invocations driven by a config
   file.
@@ -374,18 +418,19 @@ hermetic:
 LTA_DATAMALL_KEY=... go test -tags live ./examples/lta-agent/...
 ```
 
-The runtime test suite includes some rare timing-sensitive cases —
-if a streaming-tools test flakes once, re-run before treating it as
-a real failure.
+The release qualification workflow runs uncached race-enabled tests on
+hosted Linux and macOS, reconciles the complete test inventory, rejects
+skips and incomplete packages, and repeats critical process-lifecycle
+tests. See [`scripts/QUALIFICATION.md`](./scripts/QUALIFICATION.md).
 
 ## Status
 
-`v0.3.9` is the latest tagged release. The v0.x line follows Go
+`v0.4.0` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.3.9
+go get github.com/sausheong/harness@v0.4.0
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
