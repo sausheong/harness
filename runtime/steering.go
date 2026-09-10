@@ -45,7 +45,7 @@ func (r *Runtime) applySteering(ctx context.Context, pending []llm.ToolCall) (bo
 		return false, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, context.Cause(ctx)
 	}
 	message, err := source(ctx)
 	if err != nil || message == nil {

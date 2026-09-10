@@ -602,7 +602,12 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				thresholdHit := window > 0 && estimate > int(threshold*float64(window))
 				msgCap := r.Compaction.MessageCap
 				countHit := msgCap > 0 && len(msgs) > msgCap
-				if thresholdHit || countHit {
+				keep := r.Compaction.PreserveTurns
+				if keep <= 0 {
+					keep = 4
+				}
+				_, _, eligible := compaction.Split(r.Session.View(), keep)
+				if (thresholdHit || countHit) && eligible {
 					r.emit(AgentEvent{Type: EventCompactionStart})
 					res, _ := r.Compaction.MaybeCompact(ctx, r.Session, compaction.ReasonPreventive, "")
 					if res.Compacted {

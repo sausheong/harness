@@ -339,6 +339,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 				// Finish reason
 				if choice.FinishReason == openai.FinishReasonToolCalls || choice.FinishReason == openai.FinishReasonStop {
 					emitToolCalls(events, toolCalls)
+					clear(toolCalls)
 				}
 			}
 		}
