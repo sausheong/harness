@@ -34,6 +34,8 @@ const (
 	EventCompactionDone
 	EventCompactionSkipped
 	EventRequestUsage
+	// EventToolCallReady carries complete arguments before tool execution.
+	EventToolCallReady
 )
 
 // AgentEvent is a single streaming event from the agent.
@@ -687,6 +689,8 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 			preTokenRetried := false
 			retriedRefusal := false
 			var refused bool
+			retriedEmpty := false
+			var terminalReason string
 			var refusalCategory string
 		streamLoop:
 			for {
@@ -728,6 +732,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 							}
 							break streamLoop
 						}
+						r.emit(AgentEvent{Type: EventToolCallReady, ToolCall: &tc})
 						toolCalls = append(toolCalls, tc)
 						if !streamingOn || kickoffStopped {
 							continue
@@ -746,6 +751,7 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 						}()
 
 					case llm.EventDone:
+						terminalReason = event.StopReason
 						refused = event.StopReason == llm.StopReasonRefusal
 						refusalCategory = event.StopCategory
 						if event.Usage != nil && r.calibrator != nil {
@@ -871,6 +877,22 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 					textContent.WriteString(note)
 					r.emit(AgentEvent{Type: EventTextDelta, Text: note})
 				}
+				// Retry only an empty, non-truncated response with no tool activity.
+				// Keep the same request and output allowance; never replay tools.
+				limited := terminalReason == "length" || terminalReason == "max_tokens"
+				if !limited && !refused && strings.TrimSpace(textContent.String()) == "" && len(toolCalls) == 0 && len(kickoffs) == 0 && !gotFirstToken && !retriedEmpty {
+					retriedEmpty = true
+					terminalReason = ""
+					thinkingBlocks = nil
+					retryStream, retryErr := r.observeChat(ctx, req, llm.CallRetry, r.LLM.ChatStream)
+					if retryErr != nil {
+						stopReason = "error"
+						r.emit(AgentEvent{Type: EventError, Error: retryErr})
+						return
+					}
+					streamSource = retryStream
+					continue streamLoop
+				}
 				break streamLoop
 			}
 			tr.Mark("llm.stream_end", "turn", turn,
@@ -909,6 +931,18 @@ func (r *Runtime) Run(ctx context.Context, userMsg string, images []llm.ImageCon
 				return
 			}
 			if len(toolCalls) == 0 {
+				var responseErr error
+				if terminalReason == "length" || terminalReason == "max_tokens" {
+					responseErr = fmt.Errorf("model reached its output limit (%d tokens) before finishing; increase max_output or use a model with a larger output allowance", req.MaxTokens)
+				} else if strings.TrimSpace(textContent.String()) == "" {
+					responseErr = errors.New("model returned no answer; try again or choose another model")
+				}
+				if responseErr != nil {
+					drainKickoffs(kickoffs)
+					stopReason = "error"
+					r.emit(AgentEvent{Type: EventError, Error: responseErr})
+					return
+				}
 				if len(kickoffs) > 0 {
 					drainKickoffs(kickoffs)
 				}

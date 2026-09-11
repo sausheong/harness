@@ -173,6 +173,7 @@ func (r *Runtime) RunTurn(ctx context.Context, userMsg string, images []llm.Imag
 	var toolCalls []llm.ToolCall
 	var thinkingBlocks []session.ThinkingBlockData
 	retriedRefusal := false
+	var terminalReason string
 streamLoop:
 	for {
 		toolIDs := make(map[string]bool)
@@ -205,9 +206,11 @@ streamLoop:
 						emit(AgentEvent{Type: EventError, Error: err})
 						return r.turnSlice(startLen, true, "error", ledger.Total(), err), nil
 					}
+					emit(AgentEvent{Type: EventToolCallReady, ToolCall: event.ToolCall})
 					toolCalls = append(toolCalls, *event.ToolCall)
 				}
 			case llm.EventDone:
+				terminalReason = event.StopReason
 				refused = event.StopReason == llm.StopReasonRefusal
 				refusalCategory = event.StopCategory
 			case llm.EventError:
@@ -257,6 +260,16 @@ streamLoop:
 	}
 
 	if len(toolCalls) == 0 {
+		var responseErr error
+		if terminalReason == "length" || terminalReason == "max_tokens" {
+			responseErr = fmt.Errorf("model reached its output limit (%d tokens) before finishing; increase max_output or use a model with a larger output allowance", req.MaxTokens)
+		} else if strings.TrimSpace(textContent.String()) == "" {
+			responseErr = fmt.Errorf("model returned no answer; try again or choose another model")
+		}
+		if responseErr != nil {
+			emit(AgentEvent{Type: EventError, Error: responseErr})
+			return r.turnSlice(startLen, true, "error", ledger.Total(), responseErr), nil
+		}
 		// Exchange complete: ingest the full thread once. Background + best-effort
 		// (the KG spawns its own bounded goroutine), so it never delays the turn.
 		// context.Background() because the request ctx may be cancelling and the

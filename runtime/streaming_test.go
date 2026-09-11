@@ -102,7 +102,8 @@ func (s *scriptedStreamLLM) ChatStream(ctx context.Context, _ llm.ChatRequest) (
 	go func() {
 		defer close(out)
 		if n != 1 {
-			// Subsequent turns: terminate quickly with no tool calls.
+			// Subsequent turns: answer without further tool calls.
+			out <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Answer"}
 			out <- llm.ChatEvent{Type: llm.EventDone}
 			return
 		}
@@ -791,7 +792,7 @@ func TestRun_StreamingCortexAppendIsRaceClean(t *testing.T) {
 		Model:        "test",
 		MaxTurns:     2,
 		KG:           neverRecallKG{}, // non-nil sentinel; never invoked
-		IngestSource: "cron",           // disables deferred IngestThreadAsync
+		IngestSource: "cron",          // disables deferred IngestThreadAsync
 	}
 
 	// Trivial userMsg "ok" → ShouldRecall returns false → no Recall call on

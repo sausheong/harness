@@ -30,7 +30,7 @@ func TestRunLifecycleStartFailureAndFinishCannotChangeOutcome(t *testing.T) {
 						t.Error("finish unbounded")
 					}
 					panic("observer cannot rewrite outcome")
-				}}, []llm.ChatEvent{{Type: llm.EventDone}}, nil)
+				}}, []llm.ChatEvent{{Type: llm.EventTextDelta, Text: "Answer"}, {Type: llm.EventDone}}, nil)
 				defer rt.Close()
 				defer rt.Session.Close()
 				failed := false

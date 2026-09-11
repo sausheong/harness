@@ -274,6 +274,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 		toolCalls := make(map[int]*pendingTC)
 
 		var lastUsage *llm.Usage
+		var finishReason string
 
 		for {
 			resp, err := stream.Recv()
@@ -337,6 +338,9 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 				}
 
 				// Finish reason
+				if choice.FinishReason != "" {
+					finishReason = string(choice.FinishReason)
+				}
 				if choice.FinishReason == openai.FinishReasonToolCalls || choice.FinishReason == openai.FinishReasonStop {
 					emitToolCalls(events, toolCalls)
 					clear(toolCalls)
@@ -344,7 +348,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 			}
 		}
 
-		events <- llm.ChatEvent{Type: llm.EventDone, Usage: lastUsage}
+		events <- llm.ChatEvent{Type: llm.EventDone, Usage: lastUsage, StopReason: finishReason}
 	}()
 
 	return events, nil

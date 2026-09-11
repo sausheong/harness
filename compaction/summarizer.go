@@ -119,6 +119,7 @@ func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstruc
 	}
 
 	var sb strings.Builder
+	var terminalReason string
 	for ev := range stream {
 		switch ev.Type {
 		case llm.EventTextDelta:
@@ -126,12 +127,17 @@ func (s *Summarizer) callOnce(ctx context.Context, transcript, additionalInstruc
 				return "", errors.New("summariser response exceeds 256 KiB")
 			}
 			sb.WriteString(ev.Text)
+		case llm.EventDone:
+			terminalReason = ev.StopReason
 		case llm.EventError:
 			return "", fmt.Errorf("compaction: stream error: %w", ev.Error)
 		}
 	}
 	if err := callCtx.Err(); err != nil {
 		return "", err
+	}
+	if terminalReason == "length" || terminalReason == "max_tokens" {
+		return "", errors.New("summariser reached its output limit; original history retained")
 	}
 	out := strings.TrimSpace(sb.String())
 	if out == "" {

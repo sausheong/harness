@@ -27,6 +27,8 @@ func (p *authoringProvider) ChatStream(_ context.Context, req llm.ChatRequest) (
 		ch <- llm.ChatEvent{Type: llm.EventToolCallDone, ToolCall: &llm.ToolCall{ID: "author", Name: "skill_manage", Input: json.RawMessage(`{"action":"create","name":"authored-skill","body":"---\ndescription: newly authored workflow\n---\nunique procedure body"}`)}}
 	case 2:
 		ch <- llm.ChatEvent{Type: llm.EventToolCallDone, ToolCall: &llm.ToolCall{ID: "load", Name: "load_skill", Input: json.RawMessage(`{"name":"authored-skill"}`)}}
+	default:
+		ch <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Skill created and loaded."}
 	}
 	ch <- llm.ChatEvent{Type: llm.EventDone}
 	close(ch)

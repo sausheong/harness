@@ -29,6 +29,9 @@ func (p *requestUsageProvider) ChatStream(_ context.Context, req llm.ChatRequest
 	if p.calls < p.total {
 		ch <- llm.ChatEvent{Type: llm.EventToolCallDone, ToolCall: &llm.ToolCall{ID: req.Model, Name: "noop", Input: json.RawMessage(`{}`)}}
 	}
+	if p.calls >= p.total {
+		ch <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Answer"}
+	}
 	usage := &llm.Usage{InputTokens: 20000, OutputTokens: 100, CacheReadInputTokens: 15000}
 	if p.missingLast && p.calls == p.total {
 		usage = nil
@@ -87,7 +90,10 @@ type refusalUsageProvider struct {
 
 func (p *refusalUsageProvider) ChatStream(context.Context, llm.ChatRequest) (<-chan llm.ChatEvent, error) {
 	p.calls++
-	ch := make(chan llm.ChatEvent, 1)
+	ch := make(chan llm.ChatEvent, 2)
+	if p.calls > 1 {
+		ch <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Answer"}
+	}
 	e := llm.ChatEvent{Type: llm.EventDone, Usage: &llm.Usage{InputTokens: 10000}}
 	if p.calls == 1 {
 		e.StopReason = llm.StopReasonRefusal

@@ -24,7 +24,8 @@ func (p *attachmentReplayProvider) ChatStream(_ context.Context, req llm.ChatReq
 	for _, msg := range req.Messages {
 		p.images = append(p.images, msg.Images...)
 	}
-	events := make(chan llm.ChatEvent, 1)
+	events := make(chan llm.ChatEvent, 2)
+	events <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Answer"}
 	events <- llm.ChatEvent{Type: llm.EventDone}
 	close(events)
 	return events, nil

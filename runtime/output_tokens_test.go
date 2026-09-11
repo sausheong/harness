@@ -20,7 +20,8 @@ func (p *outputLimitProvider) ChatStream(_ context.Context, r llm.ChatRequest) (
 	if p.fallback && len(p.limits) == 1 {
 		return nil, errors.New("529 overloaded")
 	}
-	ch := make(chan llm.ChatEvent, 1)
+	ch := make(chan llm.ChatEvent, 2)
+	ch <- llm.ChatEvent{Type: llm.EventTextDelta, Text: "Answer"}
 	ch <- llm.ChatEvent{Type: llm.EventDone}
 	close(ch)
 	return ch, nil
