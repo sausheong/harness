@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.4.0.** Latest tagged release. The `runtime` API
+> **Status: v0.4.2.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -25,6 +25,29 @@ It is **not** a CLI, a UI, a hosted runtime, or a framework with
 opinions about how your agents should be deployed. There is no
 `harness` binary. You import packages, compose a `Runtime`, and call
 `rt.Run(ctx, msg, nil)`.
+
+## What's in v0.4.2
+
+[v0.4.2](https://github.com/sausheong/harness/releases/tag/v0.4.2)
+improves response handling and tool visibility for applications such as Hand:
+
+- **Empty answers fail clearly.** `Runtime.Run` retries a response with no text
+  or tool calls once, subject to existing budgets and cancellation. It keeps
+  the same output allowance and does not replay tools. If no answer arrives,
+  the run reports an error. `RunTurn` reports the error directly; its caller
+  controls retries.
+- **Output limits remain visible.** Answers stopped by `length` or `max_tokens`
+  are reported as incomplete rather than successful. The OpenAI-compatible
+  provider preserves finish reasons and trailing usage records, and does not
+  dispatch partial tool arguments from an output-truncated response.
+- **Truncated summaries preserve history.** Compaction rejects a summary that
+  reaches its output limit, retaining the original conversation.
+- **Complete tool arguments before execution.** `EventToolCallReady` carries
+  the complete tool call so a host can preview a command before it runs.
+
+This includes the v0.4.1 fixes for repeated stream finishes and preservation
+of cancellation causes. See [releases](https://github.com/sausheong/harness/releases)
+for version-by-version notes.
 
 ## What's in v0.4.0
 
@@ -311,8 +334,10 @@ Deliberately not in scope:
 ## Design notes
 
 - **Streaming-first.** The loop yields `EventTextDelta`,
-  `EventToolCallStart`, `EventToolResult`, `EventDone`, and friends
-  through a `<-chan ChatEvent`. There is no buffered "give me the
+  `EventToolCallStart`, `EventToolCallReady`, `EventToolResult`,
+  `EventDone`, and friends through a `<-chan AgentEvent`.
+  Use `EventToolCallReady` for complete arguments; the start event may arrive
+  before arguments are available. There is no buffered "give me the
   whole response" path — even the non-streaming fallback re-emits
   through the same channel.
 - **Prompt-cache discipline.** Tool definitions are sorted, system
@@ -425,12 +450,12 @@ tests. See [`scripts/QUALIFICATION.md`](./scripts/QUALIFICATION.md).
 
 ## Status
 
-`v0.4.0` is the latest tagged release. The v0.x line follows Go
+`v0.4.2` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.4.0
+go get github.com/sausheong/harness@v0.4.2
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
