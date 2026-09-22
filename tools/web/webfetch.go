@@ -14,9 +14,12 @@ import (
 )
 
 const (
-	maxFetchSize    = 5 * 1024 * 1024 // 5MB
-	fetchTimeout    = 30 * time.Second
-	MaxOutputLength = 50000 // truncate very long pages
+	maxFetchSize = 8 * 1024 * 1024 // 8MB raw read; headroom over MaxOutputLength since HTML->markdown shrinks most pages but plain text/JSON responses pass through near 1:1
+	fetchTimeout = 30 * time.Second
+	// MaxOutputLength caps fetched content at roughly 1M tokens, matching
+	// Sonnet 5's context window, using this codebase's own token estimate
+	// of 4 chars/token (see session.Session.EstimateTokens).
+	MaxOutputLength = 4_000_000
 )
 
 // WebFetchTool fetches a URL and returns its content as markdown.
