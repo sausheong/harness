@@ -759,6 +759,27 @@ func TestOpus5AndSonnet5_ThinkByDefault_ReasoningOffSendsDisabled(t *testing.T) 
 	}
 }
 
+// TestOpus5_5_ReasoningOffSendsAdaptiveLow guards against a 400 from Opus
+// 5.5: its ID matches the "claude-opus-5" marker, so it inherited Opus 5's
+// explicit {type:"disabled"} — which Opus 5.5 rejects ("thinking.type.disabled
+// is not supported for this model"). The nearest accepted equivalent of
+// "reasoning off" is adaptive thinking at low effort.
+func TestOpus5_5_ReasoningOffSendsAdaptiveLow(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	for _, model := range []string{"claude-opus-5-5", "claude-opus-5-5-global"} {
+		t.Run(model, func(t *testing.T) {
+			got := wireJSON(t, p, llm.ChatRequest{
+				Model:    model,
+				Messages: []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			assert.NotContains(t, got, `"disabled"`,
+				"Opus 5.5 rejects thinking.type.disabled")
+			assert.Contains(t, got, `"thinking":{"type":"adaptive"}`)
+			assert.Contains(t, got, `"effort":"low"`)
+		})
+	}
+}
+
 func TestLegacyThinkingModels_KeepBudgetTokens(t *testing.T) {
 	p := NewAnthropicProvider("test-key", "")
 	got := wireJSON(t, p, llm.ChatRequest{

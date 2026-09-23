@@ -160,6 +160,16 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 			slog.Info("anthropic adaptive thinking",
 				"model", model,
 				"effort", string(anthropicEffort(req.Reasoning)))
+		} else if anthropicRejectsDisabledThinking(model) {
+			// Opus 5.5 can't turn thinking off: {type:"disabled"} is a 400
+			// ("use thinking.type.adaptive and output_config.effort").
+			// Adaptive at low effort is the closest accepted "off".
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+			}
+			params.OutputConfig = anthropic.OutputConfigParam{
+				Effort: anthropic.OutputConfigEffortLow,
+			}
 		} else if anthropicThinksByDefault(model) {
 			// Opus 5 and Sonnet 5 think by default when the thinking
 			// param is omitted entirely (unlike Opus 4.7/4.8, Fable 5,
@@ -555,6 +565,13 @@ func anthropicThinksByDefault(model string) bool {
 		}
 	}
 	return false
+}
+
+// anthropicRejectsDisabledThinking reports whether the model returns a 400
+// for thinking {type:"disabled"}. Checked before anthropicThinksByDefault,
+// whose "claude-opus-5" marker also matches Opus 5.5 IDs.
+func anthropicRejectsDisabledThinking(model string) bool {
+	return strings.Contains(model, "claude-opus-5-5")
 }
 
 // anthropicEffort maps the unified ReasoningMode onto output_config.effort
