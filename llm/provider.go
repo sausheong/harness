@@ -22,10 +22,14 @@ const (
 	EventThinkingBlock
 )
 
-// ImageContent holds image data for multimodal messages.
+// ImageContent holds image data for multimodal messages. MimeType
+// "application/pdf" is carried as a PDF document (not an image) by
+// providers that support it (e.g. Anthropic emits a `document` block);
+// providers without PDF support report a clear error or placeholder
+// instead of silently mishandling the bytes.
 type ImageContent struct {
-	MimeType string // "image/jpeg", "image/png", etc.
-	Data     []byte // raw image bytes
+	MimeType string // "image/jpeg", "image/png", "application/pdf", etc.
+	Data     []byte // raw bytes
 }
 
 // Message represents a conversation message.

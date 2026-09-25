@@ -221,6 +221,101 @@ func TestAnthropic_ToolResultsWithImages(t *testing.T) {
 	assert.True(t, p3.IsError.Value)
 }
 
+// TestAnthropic_ToolResultWithPDFAttachment verifies that a tool result
+// carrying a PDF attachment (MimeType "application/pdf") emits a
+// document block with media_type application/pdf and the base64 data,
+// alongside a separate image attachment's own image block.
+func TestAnthropic_ToolResultWithPDFAttachment(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47}
+	pdfBytes := []byte("%PDF-1.4 fake pdf bytes")
+	in := []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{ID: "R1", Name: "read_document", Input: []byte(`{}`)},
+			},
+		},
+		{
+			Role:       "user",
+			ToolCallID: "R1",
+			Content:    "here are the pages",
+			Images: []llm.ImageContent{
+				{MimeType: "image/png", Data: pngBytes},
+				{MimeType: "application/pdf", Data: pdfBytes},
+			},
+		},
+	}
+
+	got := buildAnthropicMessages(in, false)
+	require.Len(t, got, 2)
+	toolResult := got[1].Content[0].OfToolResult
+	require.NotNil(t, toolResult)
+	require.Len(t, toolResult.Content, 3, "image + document + text caption")
+
+	require.NotNil(t, toolResult.Content[0].OfImage)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pngBytes), toolResult.Content[0].OfImage.Source.OfBase64.Data)
+
+	doc := toolResult.Content[1].OfDocument
+	require.NotNil(t, doc, "expected a document block for the PDF attachment")
+	require.NotNil(t, doc.Source.OfBase64)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pdfBytes), doc.Source.OfBase64.Data)
+
+	require.NotNil(t, toolResult.Content[2].OfText)
+	assert.Equal(t, "here are the pages", toolResult.Content[2].OfText.Text)
+
+	// Confirm the wire format: media_type defaults to "application/pdf" only
+	// on marshal (it's a zero-value constant type until then).
+	raw, err := json.Marshal(toolResult.Content[1])
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"media_type":"application/pdf"`)
+	assert.Contains(t, string(raw), `"type":"document"`)
+}
+
+// TestAnthropic_UserMessageWithPDFAttachment verifies that a PDF attachment
+// on a plain user message (not a tool result) also produces a document
+// block rather than an image block.
+func TestAnthropic_UserMessageWithPDFAttachment(t *testing.T) {
+	pdfBytes := []byte("%PDF-1.4 fake pdf bytes")
+	in := []llm.Message{
+		{
+			Role:    "user",
+			Content: "read this",
+			Images: []llm.ImageContent{
+				{MimeType: "application/pdf", Data: pdfBytes},
+			},
+		},
+	}
+
+	got := buildAnthropicMessages(in, false)
+	require.Len(t, got, 1)
+	require.Len(t, got[0].Content, 2, "document block + text")
+	doc := got[0].Content[0].OfDocument
+	require.NotNil(t, doc, "expected a document block for the PDF attachment")
+	require.NotNil(t, doc.Source.OfBase64)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pdfBytes), doc.Source.OfBase64.Data)
+	require.Nil(t, got[0].Content[0].OfImage)
+	require.NotNil(t, got[0].Content[1].OfText)
+	assert.Equal(t, "read this", got[0].Content[1].OfText.Text)
+}
+
+// TestAnthropic_ImageOnlyToolResultUnchanged pins the pre-PDF behavior: a
+// tool result with only image attachments (no PDFs) is unaffected by the
+// PDF branch added to buildToolResultBlock.
+func TestAnthropic_ImageOnlyToolResultUnchanged(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47}
+	in := []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "I1", Name: "snap", Input: []byte(`{}`)}}},
+		{Role: "user", ToolCallID: "I1", Images: []llm.ImageContent{{MimeType: "image/png", Data: pngBytes}}},
+	}
+	got := buildAnthropicMessages(in, false)
+	require.Len(t, got, 2)
+	tr := got[1].Content[0].OfToolResult
+	require.NotNil(t, tr)
+	require.Len(t, tr.Content, 1)
+	require.NotNil(t, tr.Content[0].OfImage)
+	require.Nil(t, tr.Content[0].OfDocument)
+}
+
 func TestAnthropicSystemPromptPartsEmitCacheControl(t *testing.T) {
 	got := buildAnthropicSystem(llm.ChatRequest{
 		SystemPromptParts: []llm.SystemPromptPart{

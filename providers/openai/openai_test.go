@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -72,6 +73,75 @@ func TestOpenAIChatStreamPartsBeatString(t *testing.T) {
 	require.NotNil(t, captured)
 	require.GreaterOrEqual(t, len(captured.Messages), 1)
 	require.Equal(t, "new", captured.Messages[0].Content)
+}
+
+// TestOpenAIChatStream_PDFToolResultOmittedWithPlaceholder verifies that a
+// PDF attachment on a tool result is never emitted as an image_url data
+// URI (which would be invalid — image_url expects an image MIME type) and
+// that the placeholder text takes its place; a real image attachment in
+// the same result is still emitted.
+func TestOpenAIChatStream_PDFToolResultOmittedWithPlaceholder(t *testing.T) {
+	pngBytes := []byte{0x89, 0x50, 0x4E, 0x47}
+	pdfBytes := []byte("%PDF-1.4 fake")
+	captured := captureOpenAIRequest(t, llm.ChatRequest{
+		Messages: []llm.Message{
+			{
+				Role:       "user",
+				ToolCallID: "T1",
+				Content:    "see attached",
+				Images: []llm.ImageContent{
+					{MimeType: "image/png", Data: pngBytes},
+					{MimeType: "application/pdf", Data: pdfBytes},
+				},
+			},
+		},
+	})
+	require.NotNil(t, captured)
+
+	var sawImage, sawPlaceholder bool
+	for _, m := range captured.Messages {
+		for _, part := range m.MultiContent {
+			if part.Type == openai.ChatMessagePartTypeImageURL && part.ImageURL != nil {
+				require.NotContains(t, part.ImageURL.URL, "application/pdf", "a PDF must never be sent as image_url")
+				sawImage = true
+			}
+			if part.Type == openai.ChatMessagePartTypeText && strings.Contains(part.Text, pdfAttachmentPlaceholder) {
+				sawPlaceholder = true
+			}
+		}
+	}
+	require.True(t, sawImage, "the PNG attachment must still be emitted as image_url")
+	require.True(t, sawPlaceholder, "the PDF attachment must be replaced with the placeholder text")
+}
+
+// TestOpenAIChatStream_PDFUserMessageOmittedWithPlaceholder covers the
+// plain user-message image branch (not a tool result).
+func TestOpenAIChatStream_PDFUserMessageOmittedWithPlaceholder(t *testing.T) {
+	pdfBytes := []byte("%PDF-1.4 fake")
+	captured := captureOpenAIRequest(t, llm.ChatRequest{
+		Messages: []llm.Message{
+			{
+				Role:    "user",
+				Content: "read this",
+				Images:  []llm.ImageContent{{MimeType: "application/pdf", Data: pdfBytes}},
+			},
+		},
+	})
+	require.NotNil(t, captured)
+
+	var sawImageURL, sawPlaceholder bool
+	for _, m := range captured.Messages {
+		for _, part := range m.MultiContent {
+			if part.Type == openai.ChatMessagePartTypeImageURL {
+				sawImageURL = true
+			}
+			if part.Type == openai.ChatMessagePartTypeText && strings.Contains(part.Text, pdfAttachmentPlaceholder) {
+				sawPlaceholder = true
+			}
+		}
+	}
+	require.False(t, sawImageURL, "a PDF must never be sent as image_url")
+	require.True(t, sawPlaceholder, "the PDF attachment must be replaced with the placeholder text")
 }
 
 func TestEmitToolCalls_OrderedByIndex(t *testing.T) {
