@@ -638,6 +638,10 @@ func buildAnthropicMessages(in []llm.Message, cacheLast bool) []anthropic.Messag
 				var blocks []anthropic.ContentBlockParamUnion
 				for _, img := range m.Images {
 					encoded := base64.StdEncoding.EncodeToString(img.Data)
+					if img.MimeType == "application/pdf" {
+						blocks = append(blocks, anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{Data: encoded}))
+						continue
+					}
 					blocks = append(blocks, anthropic.NewImageBlockBase64(img.MimeType, encoded))
 				}
 				if m.Content != "" {
@@ -711,6 +715,8 @@ func setCacheControlOnBlock(block *anthropic.ContentBlockParamUnion, cache *llm.
 		block.OfToolResult.CacheControl = cc
 	case block.OfImage != nil:
 		block.OfImage.CacheControl = cc
+	case block.OfDocument != nil:
+		block.OfDocument.CacheControl = cc
 	case block.OfToolUse != nil:
 		block.OfToolUse.CacheControl = cc
 	}
@@ -726,6 +732,16 @@ func buildToolResultBlock(m llm.Message) anthropic.ContentBlockParamUnion {
 		var content []anthropic.ToolResultBlockParamContentUnion
 		for _, img := range m.Images {
 			encoded := base64.StdEncoding.EncodeToString(img.Data)
+			if img.MimeType == "application/pdf" {
+				content = append(content, anthropic.ToolResultBlockParamContentUnion{
+					OfDocument: &anthropic.DocumentBlockParam{
+						Source: anthropic.DocumentBlockParamSourceUnion{
+							OfBase64: &anthropic.Base64PDFSourceParam{Data: encoded},
+						},
+					},
+				})
+				continue
+			}
 			content = append(content, anthropic.ToolResultBlockParamContentUnion{
 				OfImage: &anthropic.ImageBlockParam{
 					Source: anthropic.ImageBlockParamSourceUnion{

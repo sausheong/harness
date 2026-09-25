@@ -14,6 +14,13 @@ import (
 	"github.com/sausheong/harness/llm"
 )
 
+// pdfAttachmentPlaceholder replaces a PDF attachment (llm.ImageContent with
+// MimeType "application/pdf") in outgoing messages: OpenAI's image_url part
+// only accepts image MIME types, so sending a PDF that way would either be
+// silently ignored or rejected by the API. Gemini accepts application/pdf
+// inline natively and is not routed through this builder.
+const pdfAttachmentPlaceholder = "[PDF attachment omitted: this provider can't read PDFs]"
+
 // logOpenAIError unwraps the go-openai SDK error into a structured slog.WARN
 // record so we can see exactly why LiteLLM/OpenAI rejected the request — the
 // SDK's flat error string drops Param, Type, Code, and the raw response body
@@ -129,6 +136,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 				if len(m.Images) > 0 {
 					var parts []openai.ChatMessagePart
 					for _, img := range m.Images {
+						if img.MimeType == "application/pdf" {
+							parts = append(parts, openai.ChatMessagePart{
+								Type: openai.ChatMessagePartTypeText,
+								Text: pdfAttachmentPlaceholder,
+							})
+							continue
+						}
 						encoded := base64.StdEncoding.EncodeToString(img.Data)
 						dataURI := fmt.Sprintf("data:%s;base64,%s", img.MimeType, encoded)
 						parts = append(parts, openai.ChatMessagePart{
@@ -151,6 +165,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<
 			} else if len(m.Images) > 0 {
 				var parts []openai.ChatMessagePart
 				for _, img := range m.Images {
+					if img.MimeType == "application/pdf" {
+						parts = append(parts, openai.ChatMessagePart{
+							Type: openai.ChatMessagePartTypeText,
+							Text: pdfAttachmentPlaceholder,
+						})
+						continue
+					}
 					encoded := base64.StdEncoding.EncodeToString(img.Data)
 					dataURI := fmt.Sprintf("data:%s;base64,%s", img.MimeType, encoded)
 					parts = append(parts, openai.ChatMessagePart{
