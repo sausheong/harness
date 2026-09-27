@@ -132,9 +132,9 @@ a lot. The package is optimized for the use cases above, not these.
 
 ## Requirements
 
-- **Go 1.25.1 or newer.** The module declares `go 1.25.1` and uses
-  `iter.Seq` from `iter` (Go 1.23+) plus a few stdlib calls that
-  hardened in 1.25. Older toolchains will fail at `go build`.
+- **Go 1.26 or newer.** The module declares `go 1.26.0`, required by
+  the Stagehand SDK that `tools/stagehand` depends on. With the default
+  `GOTOOLCHAIN=auto`, an older local Go downloads 1.26 automatically.
 - **An LLM API key**, depending on which provider(s) you wire in:
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, Google ADC for Gemini, or a
   LiteLLM/OpenRouter key for those aggregators. For local models
@@ -183,6 +183,8 @@ github.com/sausheong/harness/
     ├── bash/           # bash (with ExecPolicy: deny | allowlist | full)
     ├── web/            # web_fetch, web_search, ssrf guard
     ├── browser/        # chromedp wrapper with per-session reuse
+    ├── stagehand/      # natural-language browser (Stagehand: act/observe/extract),
+    │                   # local Chrome or Browserbase; inference via your LLMProvider
     ├── mcp/            # Connect to external MCP servers; adapt their tools
     └── todo/           # todo_write
 ```

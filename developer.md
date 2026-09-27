@@ -1,7 +1,7 @@
 # Writing agents with harness
 
 This guide walks you through building agents on top of `harness`. It assumes
-you've read [`README.md`](./README.md) and have a Go 1.25+ project that depends
+you've read [`README.md`](./README.md) and have a Go 1.26+ project that depends
 on `github.com/sausheong/harness`.
 
 > Two complete examples ship in [`examples/`](./examples) — `minimal/` (file +
