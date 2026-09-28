@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.4.2.** Latest tagged release. The `runtime` API
+> **Status: v0.6.0.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -25,6 +25,26 @@ It is **not** a CLI, a UI, a hosted runtime, or a framework with
 opinions about how your agents should be deployed. There is no
 `harness` binary. You import packages, compose a `Runtime`, and call
 `rt.Run(ctx, msg, nil)`.
+
+## What's in v0.6.0
+
+[v0.6.0](https://github.com/sausheong/harness/releases/tag/v0.6.0) and
+[v0.5.0](https://github.com/sausheong/harness/releases/tag/v0.5.0) add two
+tools and raise the minimum Go version:
+
+- **Go 1.26 required.** The module declares `go 1.26.0`, needed by the
+  Stagehand SDK. With the default `GOTOOLCHAIN=auto`, older toolchains
+  download 1.26 automatically; pinned CI images must be updated.
+- **Natural-language browser.** `tools/stagehand` drives a browser with
+  instructions such as "click the Sign in button" instead of CSS selectors
+  (`act`, `observe`, `extract`, plus `navigate`, `get_text`, `screenshot`).
+  It runs on local Chrome or Browserbase, and Stagehand's inference goes
+  through your own `LLMProvider`.
+- **Exa search.** `web.ExaSearchTool` (`exa_search`) returns ranked results
+  with query-relevant highlights, with category, domain and date filters.
+- **Smaller changes.** PDF attachments are sent to Anthropic as document
+  blocks, Opus 5.5 uses adaptive low-effort thinking when reasoning is off,
+  and `WebFetchTool`'s output cap is raised to about 1M tokens.
 
 ## What's in v0.4.2
 
@@ -452,12 +472,12 @@ tests. See [`scripts/QUALIFICATION.md`](./scripts/QUALIFICATION.md).
 
 ## Status
 
-`v0.4.2` is the latest tagged release. The v0.x line follows Go
+`v0.6.0` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.4.2
+go get github.com/sausheong/harness@v0.6.0
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
