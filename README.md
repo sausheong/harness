@@ -181,7 +181,7 @@ github.com/sausheong/harness/
 └── tools/              # Batteries-included concrete tools (each importable separately)
     ├── file/           # read_file (with vision), write_file, edit_file
     ├── bash/           # bash (with ExecPolicy: deny | allowlist | full)
-    ├── web/            # web_fetch, web_search, ssrf guard
+    ├── web/            # web_fetch, web_search, exa_search, ssrf guard
     ├── browser/        # chromedp wrapper with per-session reuse
     ├── stagehand/      # natural-language browser (Stagehand: act/observe/extract),
     │                   # local Chrome or Browserbase; inference via your LLMProvider
