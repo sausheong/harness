@@ -79,6 +79,12 @@ func (a *mcpToolAdapter) Execute(ctx context.Context, input json.RawMessage) (to
 // ToolResult: TextContent concatenated into Output (or Error if
 // IsError), ImageContent collected into Images. Other content types
 // (audio, embedded resources) are described in Output as a placeholder.
+//
+// StructuredContent is used only when there is no text: the MCP spec says
+// a tool returning structured content SHOULD also send it serialized as a
+// TextContent block, so when both are present the text already carries it.
+// Servers that send structured content alone would otherwise reach the
+// agent as an empty result.
 func mcpResultToToolResult(res *sdk.CallToolResult) tool.ToolResult {
 	var text strings.Builder
 	var images []llm.ImageContent
@@ -101,6 +107,13 @@ func mcpResultToToolResult(res *sdk.CallToolResult) tool.ToolResult {
 				text.WriteByte('\n')
 			}
 			fmt.Fprintf(&text, "[unsupported MCP content: %T]", c)
+		}
+	}
+	if text.Len() == 0 && res.StructuredContent != nil {
+		if b, err := json.Marshal(res.StructuredContent); err == nil {
+			text.Write(b)
+		} else {
+			fmt.Fprintf(&text, "[unserializable MCP structured content: %v]", err)
 		}
 	}
 	out := tool.ToolResult{Images: images}
