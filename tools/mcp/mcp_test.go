@@ -135,6 +135,37 @@ func TestMCPAdapter_ImageContentMapping(t *testing.T) {
 	var _ llm.ImageContent = res.Images[0]
 }
 
+func TestMCPAdapter_StructuredContentFallback(t *testing.T) {
+	cli := startInProcessServer(t, "srv", []sdkToolFixture{
+		stringArgTool("structured_only", "hits as structured content only", func(_ context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{
+				Content:           []sdk.Content{},
+				StructuredContent: map[string]any{"hits": []any{map[string]any{"text": "leave policy", "score": 0.9}}},
+			}, nil
+		}),
+		stringArgTool("both", "text and structured content", func(_ context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+			return &sdk.CallToolResult{
+				Content:           []sdk.Content{&sdk.TextContent{Text: "summary text"}},
+				StructuredContent: map[string]any{"hits": []any{}},
+			}, nil
+		}),
+	})
+	byName := map[string]int{}
+	for i, tl := range cli.Tools() {
+		byName[tl.Name()] = i
+	}
+	require.Len(t, byName, 2)
+
+	res, err := cli.Tools()[byName["mcp__srv__structured_only"]].Execute(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	assert.Empty(t, res.Error)
+	assert.JSONEq(t, `{"hits":[{"text":"leave policy","score":0.9}]}`, res.Output)
+
+	res, err = cli.Tools()[byName["mcp__srv__both"]].Execute(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "summary text", res.Output, "text wins when present; structured content is not duplicated")
+}
+
 func TestMCPClient_ConnectDiscovers(t *testing.T) {
 	cli := startInProcessServer(t, "srv", []sdkToolFixture{
 		stringArgTool("a", "first", func(_ context.Context, _ *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
