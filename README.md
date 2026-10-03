@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.6.2.** Latest tagged release. The `runtime` API
+> **Status: v0.6.3.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -25,6 +25,28 @@ It is **not** a CLI, a UI, a hosted runtime, or a framework with
 opinions about how your agents should be deployed. There is no
 `harness` binary. You import packages, compose a `Runtime`, and call
 `rt.Run(ctx, msg, nil)`.
+
+## What's in v0.6.3
+
+[v0.6.3](https://github.com/sausheong/harness/releases/tag/v0.6.3) is a
+security fix for the browser tools, plus dependency updates:
+
+- **Browser SSRF containment.** `tools/browser` and Stagehand's local-Chrome
+  mode used Chrome's `--host-resolver-rules` to keep pages away from private
+  addresses, but Chrome only glob-matches those rules, so the CIDR entries
+  never matched. A page could fetch `169.254.169.254`, RFC 1918 addresses, or
+  names that resolve to them. Chrome now runs behind `web.EgressProxy`, an
+  in-process proxy that resolves each destination, refuses private
+  addresses, and connects to the address it checked. This covers redirects,
+  sub-resources, in-page `fetch`/XHR and WebSockets, and WebRTC is limited to
+  proxied traffic. You can also use `web.StartEgressProxy` with your own
+  browser.
+- **Stricter private-address checks.** The shared SSRF guard now also blocks
+  multicast, reserved and benchmark ranges, Teredo, and IPv6 addresses that
+  embed a private IPv4 address (NAT64, 6to4). `SafeHTTPClient` races IPv4
+  and IPv6 addresses so hosts with broken IPv6 no longer stall.
+- **Dependencies.** chromedp v0.16.0, go-openai v1.43.0, html-to-markdown
+  v2.5.2, otel v1.47.0, testify v1.12.1, x/sys v0.48.0.
 
 ## What's in v0.6.2
 
@@ -215,7 +237,7 @@ github.com/sausheong/harness/
 └── tools/              # Batteries-included concrete tools (each importable separately)
     ├── file/           # read_file (with vision), write_file, edit_file
     ├── bash/           # bash (with ExecPolicy: deny | allowlist | full)
-    ├── web/            # web_fetch, web_search, exa_search, ssrf guard
+    ├── web/            # web_fetch, web_search, exa_search, ssrf guard, egress proxy
     ├── browser/        # chromedp wrapper with per-session reuse
     ├── stagehand/      # natural-language browser (Stagehand: act/observe/extract),
     │                   # local Chrome or Browserbase; inference via your LLMProvider
@@ -486,12 +508,12 @@ tests. See [`scripts/QUALIFICATION.md`](./scripts/QUALIFICATION.md).
 
 ## Status
 
-`v0.6.2` is the latest tagged release. The v0.x line follows Go
+`v0.6.3` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.6.2
+go get github.com/sausheong/harness@v0.6.3
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
