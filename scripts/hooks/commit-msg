@@ -1,0 +1,10 @@
+#!/bin/sh
+# Rejects commit messages carrying AI attribution: Claude/Anthropic
+# co-author trailers or "Generated with Claude Code" lines.
+# Install once per clone: git config core.hooksPath scripts/hooks
+
+if grep -v '^#' "$1" | grep -Eiq '^[[:space:]]*co-authored-by:.*(claude|anthropic)|generated (with|by) (\[)?claude'; then
+	echo "commit-msg: remove the AI attribution line from the commit message:" >&2
+	grep -v '^#' "$1" | grep -Ein '^[[:space:]]*co-authored-by:.*(claude|anthropic)|generated (with|by) (\[)?claude' >&2
+	exit 1
+fi
