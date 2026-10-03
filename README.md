@@ -5,7 +5,7 @@ streaming agent loop, tool registry, session storage, compaction, and
 token budgeting needed to run a multi-provider agent in production. BYO
 concrete tools, BYO provider clients, BYO memory/knowledge-graph plugins.
 
-> **Status: v0.6.0.** Latest tagged release. The `runtime` API
+> **Status: v0.6.2.** Latest tagged release. The `runtime` API
 > surface may still shift in the v0.x line — pin your version.
 
 ## Why Harness
@@ -25,6 +25,20 @@ It is **not** a CLI, a UI, a hosted runtime, or a framework with
 opinions about how your agents should be deployed. There is no
 `harness` binary. You import packages, compose a `Runtime`, and call
 `rt.Run(ctx, msg, nil)`.
+
+## What's in v0.6.2
+
+[v0.6.2](https://github.com/sausheong/harness/releases/tag/v0.6.2) and
+[v0.6.1](https://github.com/sausheong/harness/releases/tag/v0.6.1) are
+patch releases with no API changes:
+
+- **Updated provider and MCP SDKs.** `anthropic-sdk-go` moves to v1.78.0,
+  `google.golang.org/genai` to v1.72.0 and the MCP Go SDK to v1.8.0.
+  Applications that also import these modules will be raised to at least
+  these versions by Go's minimum version selection.
+- **MCP structured results.** When an MCP tool returns its result only as
+  `structuredContent`, with no text block, the adapter passes the JSON to
+  the agent instead of an empty result. Text still wins when present.
 
 ## What's in v0.6.0
 
@@ -472,12 +486,12 @@ tests. See [`scripts/QUALIFICATION.md`](./scripts/QUALIFICATION.md).
 
 ## Status
 
-`v0.6.0` is the latest tagged release. The v0.x line follows Go
+`v0.6.2` is the latest tagged release. The v0.x line follows Go
 module semver: minor bumps may break API, patch bumps are bug-fix
 only. Pin your dependency:
 
 ```bash
-go get github.com/sausheong/harness@v0.6.0
+go get github.com/sausheong/harness@v0.6.2
 ```
 
 Likely sources of v0.x churn before a v1.0.0:
