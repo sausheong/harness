@@ -17,7 +17,7 @@ func TestValidateURLNotInternal_BlocksLoopback(t *testing.T) {
 		"http://10.0.0.1/",
 		"http://172.16.0.1/",
 		"http://192.168.1.1/",
-		"http://169.254.169.254/",   // AWS/GCP/Azure metadata IP
+		"http://169.254.169.254/",          // AWS/GCP/Azure metadata IP
 		"http://metadata.google.internal/", // GCP metadata host
 	}
 	for _, u := range cases {
@@ -70,5 +70,26 @@ func TestIsPrivateIP_AllowsPublic(t *testing.T) {
 		ip := net.ParseIP(s)
 		require.NotNil(t, ip, "parse %s", s)
 		require.False(t, isPrivateIP(ip), "%s must be allowed (public)", s)
+	}
+}
+
+func TestIsPrivateIP_EmbeddedAndReserved(t *testing.T) {
+	blocked := []string{
+		"64:ff9b::7f00:1",      // NAT64 -> 127.0.0.1
+		"64:ff9b::a9fe:a9fe",   // NAT64 -> 169.254.169.254
+		"2002:7f00:1::",        // 6to4 -> 127.0.0.1
+		"::127.0.0.1",          // IPv4-compatible
+		"224.0.0.1", "ff02::1", // multicast
+		"198.18.0.1", // benchmarking
+		"240.0.0.1", "255.255.255.255",
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+	}
+	for _, s := range blocked {
+		ip := net.ParseIP(s)
+		require.NotNil(t, ip, "parse %s", s)
+		require.True(t, isPrivateIP(ip), "%s must be blocked", s)
+	}
+	for _, s := range []string{"64:ff9b::808:808", "2002:808:808::"} { // embed 8.8.8.8
+		require.False(t, isPrivateIP(net.ParseIP(s)), "%s embeds a public address", s)
 	}
 }

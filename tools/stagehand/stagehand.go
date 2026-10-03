@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -42,20 +43,6 @@ const (
 	janitorInterval    = 1 * time.Minute
 )
 
-// hostResolverRules mirrors tools/browser: it makes a *local* Chrome fail DNS
-// for localhost and private ranges so in-page fetch()/XHR can't reach
-// cloud-metadata endpoints or local services. The Go-side
-// ValidateURLNotInternal check only covers the top-level URL. Browserbase
-// browsers run remotely and can't reach this machine's network anyway.
-const hostResolverRules = "MAP localhost ~NOTFOUND," +
-	"MAP *.localhost ~NOTFOUND," +
-	"MAP 127.0.0.0/8 ~NOTFOUND," +
-	"MAP 10.0.0.0/8 ~NOTFOUND," +
-	"MAP 172.16.0.0/12 ~NOTFOUND," +
-	"MAP 169.254.0.0/16 ~NOTFOUND," +
-	"MAP 192.168.0.0/16 ~NOTFOUND," +
-	"MAP [::1] ~NOTFOUND"
-
 // Config configures a StagehandTool.
 type Config struct {
 	// Provider and Model serve Stagehand's internal inference. Required.
@@ -82,6 +69,9 @@ type session struct {
 	browser  *sh.Browser
 	client   *sh.Stagehand
 	lastUsed time.Time
+	// proxy is the egress proxy a local Chrome is forced through; nil for
+	// Browserbase and in tests.
+	proxy *web.EgressProxy
 }
 
 // StagehandTool is an AI-driven browser tool.
@@ -393,6 +383,18 @@ func (t *StagehandTool) acquire(ctx context.Context, name string) (*session, fun
 
 // launchSession starts a browser on the configured backend and attaches a
 // Stagehand client whose inference runs through the harness provider.
+//
+// A local Chrome is forced through an in-process web.EgressProxy that refuses
+// private/internal destinations at dial time (loopback, RFC 1918, link-local/
+// metadata, names resolving to them, DNS rebinding), covering sub-resource and
+// script-initiated requests that the Go-side ValidateURLNotInternal check
+// never sees. Chrome's --host-resolver-rules is not used: it only glob-matches
+// host strings, so CIDR entries never match. Browserbase browsers run remotely
+// and can't reach this machine's network anyway.
+//
+// The implicit loopback bypass is removed (<-loopback), so localhost and
+// 127.0.0.1 are refused too; the one exception is Chrome's own debugging port,
+// which Stagehand's extension needs (a page could still reach that port).
 func (t *StagehandTool) launchSession(ctx context.Context) (*session, error) {
 	// The browser outlives this call for persistent sessions, so detach it
 	// from the caller's cancellation and bound only the launch itself.
@@ -400,18 +402,45 @@ func (t *StagehandTool) launchSession(ctx context.Context) (*session, error) {
 	defer cancel()
 
 	var browser *sh.Browser
+	var proxy *web.EgressProxy
 	var err error
 	if t.cfg.BrowserbaseAPIKey != "" {
 		browser, err = sh.LaunchBrowserbase(launchCtx, sh.BrowserbaseLaunchOptions{APIKey: t.cfg.BrowserbaseAPIKey})
 	} else {
+		proxy, err = web.StartEgressProxy()
+		if err != nil {
+			return nil, fmt.Errorf("start egress proxy: %w", err)
+		}
+		// Stagehand's in-browser extension connects to Chrome's own debugging
+		// port over loopback, so pick that port up front and let exactly it
+		// through the proxy.
+		var debugPort int
+		debugPort, err = freeLoopbackPort()
+		if err != nil {
+			_ = proxy.Close()
+			return nil, fmt.Errorf("pick debugging port: %w", err)
+		}
+		proxy.AllowLoopbackPort(debugPort)
 		browser, err = sh.LaunchLocalBrowser(launchCtx, &sh.LocalBrowserLaunchOptions{
 			Headless:       !t.cfg.Headful,
 			ExecutablePath: t.cfg.ChromePath,
-			Args:           []string{"--host-resolver-rules=" + hostResolverRules},
-			Viewport:       &sh.LocalViewport{Width: defaultViewportW, Height: defaultViewportH},
+			Port:           debugPort,
+			Args: []string{
+				"--proxy-server=" + proxy.URL(),
+				// Drop Chrome's implicit loopback/link-local bypass so those
+				// destinations hit the proxy (and are refused).
+				"--proxy-bypass-list=<-loopback>",
+				// Keep WebRTC from sending UDP around the proxy.
+				"--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+				"--webrtc-ip-handling-policy=disable_non_proxied_udp",
+			},
+			Viewport: &sh.LocalViewport{Width: defaultViewportW, Height: defaultViewportH},
 		})
 	}
 	if err != nil {
+		if proxy != nil {
+			_ = proxy.Close()
+		}
 		return nil, fmt.Errorf("launch browser: %w", err)
 	}
 
@@ -423,9 +452,13 @@ func (t *StagehandTool) launchSession(ctx context.Context) (*session, error) {
 	if err != nil {
 		closeCtx, cancelClose := context.WithTimeout(context.Background(), closeTimeout)
 		defer cancelClose()
-		return nil, errors.Join(fmt.Errorf("start stagehand: %w", err), browser.Close(closeCtx))
+		cerr := browser.Close(closeCtx)
+		if proxy != nil {
+			_ = proxy.Close()
+		}
+		return nil, errors.Join(fmt.Errorf("start stagehand: %w", err), cerr)
 	}
-	return &session{browser: browser, client: client, lastUsed: time.Now()}, nil
+	return &session{browser: browser, client: client, lastUsed: time.Now(), proxy: proxy}, nil
 }
 
 // close tears down the client then the browser. Safe on a partially
@@ -438,6 +471,9 @@ func (s *session) close() {
 	}
 	if s.browser != nil {
 		_ = s.browser.Close(ctx)
+	}
+	if s.proxy != nil {
+		_ = s.proxy.Close()
 	}
 }
 
@@ -532,4 +568,14 @@ func truncate(s string) string {
 		return s
 	}
 	return s[:maxTextOutput] + fmt.Sprintf("\n\n[truncated: %d of %d bytes shown]", maxTextOutput, len(s))
+}
+
+// freeLoopbackPort returns a currently unused 127.0.0.1 TCP port.
+func freeLoopbackPort() (int, error) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port, nil
 }

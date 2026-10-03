@@ -36,24 +36,6 @@ const (
 	janitorInterval    = 1 * time.Minute
 )
 
-// hostResolverRules forces Chrome to fail DNS resolution for private/internal
-// IP ranges and localhost, so in-page fetch() and evaluate()'d JS cannot reach
-// cloud-metadata endpoints or localhost services — the Go-side
-// ValidateURLNotInternal check only sees the top-level URL, so this covers
-// sub-resource and script-initiated requests. (S3)
-//
-// Residual gap: name-based rules do not stop a page that dials a *literal*
-// private IP URL in some Chrome builds; the complete fix is an allowlisting
-// proxy (deferred). See the security-deeper spec's limitations section.
-const hostResolverRules = "MAP localhost ~NOTFOUND," +
-	"MAP *.localhost ~NOTFOUND," +
-	"MAP 127.0.0.0/8 ~NOTFOUND," +
-	"MAP 10.0.0.0/8 ~NOTFOUND," +
-	"MAP 172.16.0.0/12 ~NOTFOUND," +
-	"MAP 169.254.0.0/16 ~NOTFOUND," +
-	"MAP 192.168.0.0/16 ~NOTFOUND," +
-	"MAP [::1] ~NOTFOUND"
-
 // stealthScript runs before any page script on every new document. It hides the
 // most common headless/automation tells that JS-heavy sites use to refuse to
 // render content (Cloudflare, Akamai, anti-bot scripts, "please enable JS"
@@ -482,12 +464,33 @@ func (t *BrowserTool) reapIdleSessions() {
 // reaper watchdog. If the parent dies hard before cleanup runs, the
 // watchdog SIGKILLs any process whose argv contains that path and rm -rfs
 // the dir.
+//
+// SSRF containment: Chrome is pointed at an in-process web.EgressProxy
+// (--proxy-server, with <-loopback> so localhost is not exempt). The proxy
+// resolves each destination, refuses it if any address is private/internal
+// (loopback, RFC 1918, link-local/metadata, CGNAT, ULA), and dials the
+// validated IP directly, so nip.io-style names and DNS rebinding are caught
+// too. This covers redirects, sub-resources, in-page fetch/XHR and
+// WebSockets. WebRTC is restricted to proxied UDP. Chrome's
+// --host-resolver-rules is deliberately not used: it only glob-matches host
+// strings, so CIDR entries never match. The proxy lives and dies with the
+// returned cleanup func.
 func launchBrowser(parent context.Context) (context.Context, context.CancelFunc, error) {
 	udd, err := os.MkdirTemp("", "harness-browser-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("create user-data-dir: %w", err)
 	}
 	trackDirForReaping(udd)
+
+	// All Chrome traffic (top-level, sub-resource, in-page fetch, WebSocket)
+	// is forced through an in-process proxy that refuses private/internal
+	// destinations at dial time. See web.EgressProxy.
+	proxy, err := web.StartEgressProxy()
+	if err != nil {
+		untrackDirForReaping(udd)
+		_ = os.RemoveAll(udd)
+		return nil, nil, fmt.Errorf("start egress proxy: %w", err)
+	}
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(parent,
 		append(chromedp.DefaultExecAllocatorOptions[:],
@@ -496,7 +499,13 @@ func launchBrowser(parent context.Context) (context.Context, context.CancelFunc,
 			chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
 			chromedp.Flag("disable-blink-features", "AutomationControlled"),
 			chromedp.Flag("lang", "en-US"),
-			chromedp.Flag("host-resolver-rules", hostResolverRules),
+			chromedp.ProxyServer(proxy.URL()),
+			// Drop Chrome's implicit loopback bypass so localhost and
+			// 127.0.0.0/8 also go through (and are refused by) the proxy.
+			chromedp.Flag("proxy-bypass-list", "<-loopback>"),
+			// Keep WebRTC from sending UDP around the proxy.
+			chromedp.Flag("force-webrtc-ip-handling-policy", "disable_non_proxied_udp"),
+			chromedp.Flag("webrtc-ip-handling-policy", "disable_non_proxied_udp"),
 			chromedp.UserDataDir(udd),
 		)...,
 	)
@@ -511,6 +520,7 @@ func launchBrowser(parent context.Context) (context.Context, context.CancelFunc,
 	); err != nil {
 		taskCancel()
 		allocCancel()
+		_ = proxy.Close()
 		untrackDirForReaping(udd)
 		_ = os.RemoveAll(udd)
 		return nil, nil, err
@@ -518,6 +528,7 @@ func launchBrowser(parent context.Context) (context.Context, context.CancelFunc,
 	cleanup := func() {
 		taskCancel()
 		allocCancel()
+		_ = proxy.Close()
 		untrackDirForReaping(udd)
 		_ = os.RemoveAll(udd)
 	}

@@ -21,6 +21,32 @@ var privateNetworks = []string{
 	"fc00::/7",       // IPv6 unique local
 	"fe80::/10",      // IPv6 link-local
 	"::/128",         // IPv6 unspecified
+	"198.18.0.0/15",  // benchmarking (RFC 2544)
+	"224.0.0.0/4",    // IPv4 multicast
+	"240.0.0.0/4",    // reserved, incl. 255.255.255.255 broadcast
+	"ff00::/8",       // IPv6 multicast
+	"2001::/32",      // Teredo (embeds an obfuscated IPv4)
+	"64:ff9b:1::/48", // local-use NAT64 (RFC 8215)
+}
+
+// embeddedV4Nets are IPv6 prefixes that carry an IPv4 address translators may
+// route to: the embedded address is re-checked so e.g. 64:ff9b::7f00:1 (NAT64
+// for 127.0.0.1) is blocked while a public embedded address stays allowed.
+var embeddedV4Nets = []struct {
+	net    *net.IPNet
+	offset int // byte offset of the embedded IPv4 address
+}{
+	{mustCIDR("64:ff9b::/96"), 12}, // NAT64 well-known prefix
+	{mustCIDR("2002::/16"), 2},     // 6to4
+	{mustCIDR("::/96"), 12},        // IPv4-compatible (deprecated)
+}
+
+func mustCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return n
 }
 
 var parsedPrivateNets []*net.IPNet
@@ -39,6 +65,15 @@ func isPrivateIP(ip net.IP) bool {
 	for _, n := range parsedPrivateNets {
 		if n.Contains(ip) {
 			return true
+		}
+	}
+	if ip.To4() == nil {
+		if ip16 := ip.To16(); ip16 != nil {
+			for _, e := range embeddedV4Nets {
+				if e.net.Contains(ip16) {
+					return isPrivateIP(net.IP(ip16[e.offset : e.offset+4]))
+				}
+			}
 		}
 	}
 	return false

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -52,3 +53,22 @@ func TestSafeHTTPClient_PublicUnreachableReturnsDialError(t *testing.T) {
 
 var _ = isPrivateIP(net.IPv4(127, 0, 0, 1))
 var _ = strings.TrimSpace
+
+func TestDialValidated_FallsBackPastDeadAddress(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			_ = c.Close()
+		}
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	// First address is a black hole (TEST-NET-1); the second is live.
+	ips := []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("127.0.0.1")}
+	start := time.Now()
+	c, err := dialValidated(context.Background(), &net.Dialer{Timeout: 30 * time.Second}, "tcp", ips, port)
+	require.NoError(t, err)
+	_ = c.Close()
+	require.Less(t, time.Since(start), 5*time.Second)
+}
