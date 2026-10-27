@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/sausheong/harness/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -522,6 +523,34 @@ data: {"type":"message_stop"}
 	require.Equal(t, 69, done.Usage.InputTokens) // 10 uncached + 42 cache creation + 17 cache read
 }
 
+// TestNewAnthropicProviderWithOptionsGatewayAuth checks the gateway shape:
+// a bearer token instead of X-Api-Key, and no anthropic-version header.
+func TestNewAnthropicProviderWithOptionsGatewayAuth(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewAnthropicProviderWithOptions(
+		option.WithAuthToken("gw-token"),
+		option.WithBaseURL(srv.URL),
+		option.WithHeaderDel("anthropic-version"),
+	)
+	stream, err := p.ChatStream(context.Background(), llm.ChatRequest{Model: "claude-test"})
+	require.NoError(t, err)
+	for range stream {
+	}
+	require.NotNil(t, got, "expected a request")
+	require.Equal(t, "Bearer gw-token", got.Get("Authorization"))
+	require.Empty(t, got.Get("X-Api-Key"))
+	require.Empty(t, got.Get("Anthropic-Version"))
+}
+
 // TestBuildMessageParamsIsPure protects the cache-prefix invariant
 // behind the stream-fallback feature: when a stream dies mid-flight
 // the runtime retries via ChatNonStreaming with the SAME llm.ChatRequest,
@@ -873,6 +902,26 @@ func TestOpus5_5_ReasoningOffSendsAdaptiveLow(t *testing.T) {
 			assert.Contains(t, got, `"effort":"low"`)
 		})
 	}
+}
+
+// TestSonnet5_5_ReasoningOffSendsBetweenTools guards against a 400 from
+// Sonnet 5.5, which rejects {type:"disabled"} ("To turn thinking off on this
+// model, send thinking: {type: between_tools}"). Gateway aliases match too.
+func TestSonnet5_5_ReasoningOffSendsBetweenTools(t *testing.T) {
+	p := NewAnthropicProvider("test-key", "")
+	for _, model := range []string{"claude-sonnet-5-5", "claude-sonnet-5-5-global"} {
+		t.Run(model, func(t *testing.T) {
+			got := wireJSON(t, p, llm.ChatRequest{
+				Model:    model,
+				Messages: []llm.Message{{Role: "user", Content: "hi"}},
+			})
+			assert.NotContains(t, got, `"disabled"`)
+			assert.Contains(t, got, `"thinking":{"type":"between_tools"}`)
+		})
+	}
+	// Sonnet 5 keeps its explicit disabled config.
+	got := wireJSON(t, p, llm.ChatRequest{Model: "claude-sonnet-5", Messages: []llm.Message{{Role: "user", Content: "hi"}}})
+	assert.Contains(t, got, `"thinking":{"type":"disabled"}`)
 }
 
 func TestLegacyThinkingModels_KeepBudgetTokens(t *testing.T) {

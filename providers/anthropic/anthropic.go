@@ -29,6 +29,16 @@ func NewAnthropicProvider(apiKey, baseURL string) *AnthropicProvider {
 	return &AnthropicProvider{client: client}
 }
 
+// NewAnthropicProviderWithOptions creates a provider from Anthropic SDK request
+// options, for endpoints NewAnthropicProvider can't express: gateways that want
+// a bearer token (option.WithAuthToken) instead of X-Api-Key, or that reject the
+// SDK's version header (option.WithHeaderDel("anthropic-version")). The SDK's
+// environment defaults (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+// ANTHROPIC_BASE_URL) still apply first; opts override them.
+func NewAnthropicProviderWithOptions(opts ...option.RequestOption) *AnthropicProvider {
+	return &AnthropicProvider{client: anthropic.NewClient(opts...)}
+}
+
 // SupportsPromptCaching implements llm.PromptCachingProvider: the
 // Anthropic Messages API honours cache_control breakpoints regardless
 // of what the provider block is named in user config.
@@ -160,6 +170,13 @@ func (p *AnthropicProvider) buildMessageParams(req llm.ChatRequest) anthropic.Me
 			slog.Info("anthropic adaptive thinking",
 				"model", model,
 				"effort", string(anthropicEffort(req.Reasoning)))
+		} else if anthropicThinksBetweenTools(model) {
+			// Sonnet 5.5 rejects {type:"disabled"}: its "off" is
+			// {type:"between_tools"} (no thinking before responding; the
+			// short updates between tool calls come back as thinking blocks).
+			params.Thinking = anthropic.ThinkingConfigParamUnion{
+				OfBetweenTools: &anthropic.ThinkingConfigBetweenToolsParam{},
+			}
 		} else if anthropicRejectsDisabledThinking(model) {
 			// Opus 5.5 can't turn thinking off: {type:"disabled"} is a 400
 			// ("use thinking.type.adaptive and output_config.effort").
@@ -565,6 +582,12 @@ func anthropicThinksByDefault(model string) bool {
 		}
 	}
 	return false
+}
+
+// anthropicThinksBetweenTools reports models whose reasoning-off setting is
+// {type:"between_tools"} rather than {type:"disabled"}.
+func anthropicThinksBetweenTools(model string) bool {
+	return strings.Contains(model, "claude-sonnet-5-5")
 }
 
 // anthropicRejectsDisabledThinking reports whether the model returns a 400
